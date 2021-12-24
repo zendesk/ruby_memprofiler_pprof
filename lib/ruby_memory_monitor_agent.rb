@@ -1,0 +1,2 @@
+require "ruby_memory_monitor_agent/version"
+require "ruby_memory_monitor_agent/ruby_memory_monitor_agent_ext"

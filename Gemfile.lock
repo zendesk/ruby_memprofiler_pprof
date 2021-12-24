@@ -1,0 +1,31 @@
+PATH
+  remote: .
+  specs:
+    ruby_memory_monitor_agent (0.0.1)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    bump (0.10.0)
+    minitest (5.14.4)
+    private_gem (1.1.4)
+      bundler (> 1.7, < 3.0)
+      thor
+    rake (13.0.6)
+    rake-compiler (1.1.1)
+      rake
+    thor (1.1.0)
+
+PLATFORMS
+  x86_64-darwin-19
+
+DEPENDENCIES
+  bump (~> 0.10)
+  minitest (~> 5)
+  private_gem (~> 1)
+  rake (~> 13)
+  rake-compiler (~> 1)
+  ruby_memory_monitor_agent!
+
+BUNDLED WITH
+   2.2.27
