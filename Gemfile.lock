@@ -17,7 +17,9 @@ GEM
     thor (1.1.0)
 
 PLATFORMS
+  ruby
   x86_64-darwin-19
+  x86_64-linux
 
 DEPENDENCIES
   bump (~> 0.10)
@@ -28,4 +30,4 @@ DEPENDENCIES
   ruby_memory_monitor_agent!
 
 BUNDLED WITH
-   2.2.27
+   2.2.30
