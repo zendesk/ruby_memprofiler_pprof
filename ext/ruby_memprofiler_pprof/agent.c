@@ -4,7 +4,7 @@
 #include <time.h>
 #include "compat.h"
 
-static VALUE mRubyMemoryMonitor;
+static VALUE mMemprofilerPprof;
 static VALUE cAgent;
 
 #define AGENT_EVENT_TYPE_NEWOBJ 1
@@ -403,8 +403,8 @@ static VALUE agent_logger_set(VALUE self, VALUE newval) {
 void Init_ruby_memory_monitor_agent_ext() {
     rb_ext_ractor_safe(true);
 
-    mRubyMemoryMonitor = rb_define_module("RubyMemoryMonitor");
-    cAgent = rb_define_class_under(mRubyMemoryMonitor, "Agent", rb_cObject);
+    mMemprofilerPprof = rb_define_module("MemprofilerPprof");
+    cAgent = rb_define_class_under(mMemprofilerPprof, "Agent", rb_cObject);
     rb_define_alloc_func(cAgent, agent_alloc);
 
     rb_define_method(cAgent, "initialize", agent_initialize, 0);

@@ -1,4 +1,4 @@
-module RubyMemoryMonitor
+module MemprofilerPprof
   def self.configure
     raise "Profiling already started! Disable before reconfiguring" if @agent&.running?
     @agent ||= Agent.new

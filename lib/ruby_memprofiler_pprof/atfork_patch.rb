@@ -2,7 +2,7 @@
 # In newer rubies, this is easy (see https://bugs.ruby-lang.org/issues/17795), but in older rubies, it's a bit
 # trickier (see https://github.com/DataDog/dd-trace-rb/blob/793946146b4709289cfd459f3b68e8227a9f5fa7/lib/ddtrace/profiling/ext/forking.rb)
 
-module RubyMemoryMonitor
+module MemprofilerPprof
   def self.atfork_in_child(&blk)
     if ::Process.respond_to?(:_fork)
       # New way

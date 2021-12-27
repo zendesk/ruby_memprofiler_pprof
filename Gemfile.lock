@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    ruby_memory_monitor_agent (0.0.1)
+    ruby_memprofiler_pprof (0.0.1)
 
 GEM
   remote: https://rubygems.org/
@@ -27,7 +27,7 @@ DEPENDENCIES
   private_gem (~> 1)
   rake (~> 13)
   rake-compiler (~> 1)
-  ruby_memory_monitor_agent!
+  ruby_memprofiler_pprof!
 
 BUNDLED WITH
-   2.2.30
+   2.3.1
