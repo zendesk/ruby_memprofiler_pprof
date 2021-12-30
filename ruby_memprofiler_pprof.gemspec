@@ -16,4 +16,7 @@ Gem::Specification.new do |spec|
   spec.extensions = ["ext/ruby_memprofiler_pprof/extconf.rb"]
 
   spec.required_ruby_version = ">= 2.6.8"
+
+  spec.add_dependency 'concurrent-ruby', '~> 1'
+  spec.add_dependency 'google-protobuf', '~> 3'
 end

@@ -11,13 +11,7 @@ Bundler.require
 NUM_DISTINCT_CLASSES = 10000
 NUM_DISTINCT_METHODS = 20000
 BENCHMARK_LENGTH = 350000
-MAX_DEPTH = 250
-
-RubyMemoryMonitor.configure do |c|
-  c.allocation_sample_rate = 0.01
-  c.flush_interval = 2
-  c.logger = Logger.new(STDERR)
-end
+MAX_DEPTH = 100
 
 
 benchmark_classes = (0..NUM_DISTINCT_CLASSES).map do |n|
@@ -83,7 +77,7 @@ def benchmark_machine(sc, leak_pit)
 end
 
 
-Benchmark.bm(10) do |b|
+Benchmark.bm(20) do |b|
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
@@ -91,19 +85,35 @@ Benchmark.bm(10) do |b|
     benchmark_machine(sc, leak_pit)
   end
 
+  # leak_pit = []
+  # sc = benchmark_scenario.dup
+  # GC.start
+  # b.report("default2") do
+  #   benchmark_machine(sc, leak_pit)
+  # end
+
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
-  b.report("default2") do
+  $collector = MemprofilerPprof::Collector.new
+  b.report("with_profiling") do
+    $collector.start_profiling!
+
     benchmark_machine(sc, leak_pit)
+
+    $collector.stop_profiling!
   end
 
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
-  b.report("rmm") do
-    RubyMemoryMonitor.enable_profiling!
+  b.report("with_report") do
+    $collector.start_profiling!
+
     benchmark_machine(sc, leak_pit)
-    RubyMemoryMonitor.disable_profiling!
+    File.open('tmp/benchmark.pb.gz', 'w') do |f|
+      f.write $collector.rotate_profile!
+    end
+    $collector.stop_profiling!
   end
 end

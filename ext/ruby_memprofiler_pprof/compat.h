@@ -15,4 +15,9 @@
 #define rb_ext_ractor_safe(x) do {} while (0)
 #endif
 
+// Implemented in compat.c
+uint32_t rmm_pprof_rand();
+void rmm_pprof_rand_init();
+
+
 #endif
