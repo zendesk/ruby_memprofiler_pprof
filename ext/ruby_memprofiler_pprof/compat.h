@@ -1,5 +1,5 @@
-#ifndef __RMMA_COMPAT_H
-#define __RMMA_COMPAT_H
+#ifndef __RMPP_COMPAT_H
+#define __RMPP_COMPAT_H
 
 #include <ruby.h>
 
@@ -18,6 +18,13 @@
 // Implemented in compat.c
 uint32_t rmm_pprof_rand();
 void rmm_pprof_rand_init();
+void *rmmp_xcalloc(size_t sz);
+void rmmp_free(void *mem);
 
+void rmmp_pthread_mutex_lock(pthread_mutex_t *m);
+void rmmp_pthread_mutex_unlock(pthread_mutex_t *m);
+int rmmp_pthread_mutex_trylock(pthread_mutex_t *m);
+void rmmp_pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *attr);
+void rmmp_pthread_mutex_destroy(pthread_mutex_t *m);
 
 #endif

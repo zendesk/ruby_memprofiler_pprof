@@ -19,4 +19,5 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency 'concurrent-ruby', '~> 1'
   spec.add_dependency 'google-protobuf', '~> 3'
+  spec.add_dependency 'debase-ruby_core_source', '>= 0.10.14'
 end

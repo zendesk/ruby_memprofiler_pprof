@@ -76,45 +76,31 @@ def benchmark_machine(sc, leak_pit)
   end
 end
 
-
-Benchmark.bm(20) do |b|
-  leak_pit = []
-  sc = benchmark_scenario.dup
-  GC.start
-  b.report("default1") do
-    benchmark_machine(sc, leak_pit)
-  end
-
-  leak_pit = []
-  sc = benchmark_scenario.dup
-  GC.start
-  b.report("default2") do
-    benchmark_machine(sc, leak_pit)
-  end
-
-  leak_pit = []
-  sc = benchmark_scenario.dup
-  GC.start
-  $collector = MemprofilerPprof::Collector.new
-  $collector.sample_rate = 0.01
-  b.report("with_profiling") do
-    $collector.start_profiling!
-
-    benchmark_machine(sc, leak_pit)
-
-    $collector.stop_profiling!
-  end
-
-  leak_pit = []
-  sc = benchmark_scenario.dup
-  GC.start
-  b.report("with_report") do
-    $collector.start_profiling!
-
-    benchmark_machine(sc, leak_pit)
-    File.open('tmp/benchmark.pb.gz', 'w') do |f|
-      f.write $collector.rotate_profile!
-    end
-    $collector.stop_profiling!
-  end
+leak_pit = []
+sc = benchmark_scenario.dup
+GC.start
+GC.disable
+puts "About to run default scenario; press enter to continue"
+STDIN.gets
+t = Benchmark.realtime do
+  benchmark_machine(sc, leak_pit)
 end
+GC.enable
+puts "Default benchmark done (took #{t}s); press enter to continue"
+STDIN.gets
+
+leak_pit = []
+sc = benchmark_scenario.dup
+GC.start
+GC.disable
+$collector = MemprofilerPprof::Collector.new
+puts "About to run with_profiling scenario; press enter key to continue"
+STDIN.gets
+t = Benchmark.realtime do
+  $collector.start_profiling!
+  benchmark_machine(sc, leak_pit)
+  $collector.stop_profiling!
+end
+GC.enable
+puts "with_profiling done (took #{t}s); press enter to continue"
+STDIN.gets

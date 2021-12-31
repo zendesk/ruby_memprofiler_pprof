@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <ruby.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -47,3 +48,48 @@ void rmm_pprof_rand_init() {
 #else
 #error "No suitable RNG implementation"
 #endif
+
+void *rmmp_xcalloc(size_t sz) {
+    void *mem = malloc(sz);
+    if (!mem) {
+        rb_sys_fail("failed to allocate memory in ruby_memprofiler_pprof gem");
+    }
+    memset(mem, 0, sz);
+    return mem;
+}
+
+void rmmp_free(void *mem) {
+    free(mem);
+}
+
+void rmmp_pthread_mutex_lock(pthread_mutex_t *m) {
+    if (pthread_mutex_lock(m) != 0) {
+        rb_sys_fail("failed to lock mutex in ruby_memprofiler_pprof gem");
+    }
+}
+
+void rmmp_pthread_mutex_unlock(pthread_mutex_t *m) {
+    if (pthread_mutex_unlock(m) != 0) {
+        rb_sys_fail("failed to unlock mutex in ruby_memprofiler_pprof gem");
+    }
+}
+
+int rmmp_pthread_mutex_trylock(pthread_mutex_t *m) {
+    int r = pthread_mutex_trylock(m);
+    if (r != 0 && r != EBUSY) {
+        rb_sys_fail("failed to trylock mutex in ruby_memprofiler_pprof gem");
+    }
+    return r;
+}
+
+void rmmp_pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *attr) {
+    if (pthread_mutex_init(m, attr) != 0) {
+        rb_sys_fail("failed to init mutex in ruby_memprofiler_pprof gem");
+    }
+}
+
+void rmmp_pthread_mutex_destroy(pthread_mutex_t *m) {
+    if (pthread_mutex_destroy(m) != 0) {
+        rb_sys_fail("failed to destroy mutex in ruby_memprofiler_pprof gem");
+    }
+}

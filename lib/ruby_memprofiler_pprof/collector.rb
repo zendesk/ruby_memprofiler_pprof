@@ -30,10 +30,6 @@ module MemprofilerPprof
       @global_tags = {}
       @missed_samples = 0
       @logger = logger
-      @running = false
-
-      @sample_buffer = []
-      @sample_buffer_next_ix = 0
     end
 
     # Tags that will be applied to all samples collected by this collector
@@ -56,7 +52,7 @@ module MemprofilerPprof
     # impact of this gem.
     # @return [Float] The sample rate
     def sample_rate
-      @sample_rate
+      get_sample_rate_cimpl
     end
 
     def sample_rate=(newval)
@@ -64,9 +60,7 @@ module MemprofilerPprof
       # the newobj hook in C land, which seems like a bad idea.
       raise "Not a number!" unless newval.is_a? Numeric
       raise "Not between 0 and 1!" unless newval >= 0 && newval <= 1
-      @sample_rate = newval
-      set_sample_rate_cimpl
-      @sample_rate
+      set_sample_rate_cimpl newval
     end
 
     # @!attribute [rw]
@@ -89,15 +83,16 @@ module MemprofilerPprof
     # @return [Logger] The logger instance
     attr_accessor :logger
 
+    # @!attribute [r]
     # Returns whether or not we are currently profiling
     # @return [Boolean] Whether or not we are currently profiling
-    attr_reader :running
+    def running
+      get_running_cimpl
+    end
 
     # Begins collecting samples and appending them to the internal sample buffer
     def start_profiling!
-      raise "Already profiling!" if @running
-
-      swap_sample_buffer
+      raise "Already profiling!" if running
 
       # Attach tracepoint hooks
       enable_profiling_cimpl
@@ -112,8 +107,6 @@ module MemprofilerPprof
 
       disable_profiling_cimpl
       @running = false
-      @sample_buffer_next_ix = 0
-      @sample_buffer = []
     end
 
     # Rotates the sample collection buffer. The sample buffer is formatted as a protobuf-encoded, pprof-compatible
@@ -121,49 +114,9 @@ module MemprofilerPprof
     # collected. This method is safe to call from any thread.
     # @ return [String] A protobuf-encoded pprof profile
     def rotate_profile!
-      existing_samples, samples_start_at = swap_sample_buffer
-      samples_end_at = Time.now
-
-      samples_start_at_nanos = samples_start_at.to_i * (10 ** 9) + samples_start_at.nsec
-      samples_end_at_nanos = samples_end_at.to_i * (10 ** 9) + samples_end_at.nsec
-
-      st = StringTable.new
-      loc_table = LocationTable.new(st)
-      pprof_profile = Perftools::Profiles::Profile.new
-      pprof_profile.sample_type << Perftools::Profiles::ValueType.new(
-        type: st.index("allocations"), unit: st.index("count")
-      )
-      existing_samples.each do |sample|
-        next unless sample.filled
-
-        sample_proto = Perftools::Profiles::Sample.new
-        sample.allocation_stack.each do |frame|
-          sample_proto.location_id << loc_table.location_id(frame)
-        end
-        sample_proto.value = Google::Protobuf::RepeatedField.new(:int64, [1]) # allocation count
-        pprof_profile.sample << sample_proto
-      end
-      pprof_profile.location = loc_table.locations
-      pprof_profile.function = loc_table.functions
-      pprof_profile.string_table = st.string_table
-      pprof_profile.time_nanos = samples_start_at_nanos
-      pprof_profile.duration_nanos = samples_end_at_nanos - samples_start_at_nanos
-
-      Zlib.gzip pprof_profile.class.encode(pprof_profile)
+      rotate_profile_cimpl
     end
 
-    def inspect
-      "#<#{self.class.name}:#{self.object_id.to_s 16}>"
-    end
-
-    private
-
-    def swap_sample_buffer
-      old_started_at = @samples_started_at
-      existing_samples = swap_sample_buffer_cimpl
-      @samples_started_at = Time.now
-      [existing_samples, old_started_at]
-    end
   end
 
   Sample = Struct.new(:filled, :allocation_stack, :allocation_klass, :allocation_size)
