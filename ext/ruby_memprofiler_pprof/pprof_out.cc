@@ -7,7 +7,7 @@
 #include <zlib.h>
 
 #include "pprof.pb.h"
-#include "pprof_out.h"
+#include "ruby_memprofiler_pprof.h"
 
 template<typename T>
 struct intern_table {
@@ -65,6 +65,7 @@ struct pprof_serialize_state {
     perftools::profiles::Profile prof_msg;
     std::string serialized_msg_no_compress;
     std::vector<char> serialized_msg_gzip;
+    struct str_intern_tab_index *strtab_ix;
 };
 
 static struct pprof_serialize_state *rmmp_pprof_serialize_init_impl() {
@@ -80,29 +81,21 @@ struct pprof_serialize_state *rmmp_pprof_serialize_init() {
     }
 }
 
-static int rmmp_pprof_serialize_add_strtab_each(st_data_t key, st_data_t value, st_data_t arg) {
-    auto *st = reinterpret_cast<struct pprof_serialize_state*>(arg);
-    auto *el = reinterpret_cast<struct string_tab_el*>(value);
-
-    int ix = static_cast<int>(el->index);
-    int new_size = ix + 1;
-    // TODO: This will be incredibly inefficient.
-    if (st->prof_msg.mutable_string_table()->Capacity() < new_size) {
-        st->prof_msg.mutable_string_table()->Reserve(ix + 1);
+static void rmmp_pprof_serialize_add_strtab_impl(struct pprof_serialize_state *state, struct str_intern_tab_index *strtab_ix) {
+    state->prof_msg.mutable_string_table()->Reserve(static_cast<int>(strtab_ix->str_list_len));
+    for (size_t i = 0; i < strtab_ix->str_list_len; i++) {
+        auto el = strtab_ix->str_list[i];
+        state->prof_msg.mutable_string_table()->Add(
+            std::move(std::string(el->str, el->str_len))
+        );
     }
-    st->prof_msg.mutable_string_table()->Add(std::string(el->str));
-    return ST_CONTINUE;
-}
-
-static void rmmp_pprof_serialize_add_strtab_impl(struct pprof_serialize_state *state, st_table *strtab) {
-    // loop through everything in the strtab, and add it to the profile message.
-    rb_st_foreach(strtab, rmmp_pprof_serialize_add_strtab_each, reinterpret_cast<st_data_t>(state));
+    state->strtab_ix = strtab_ix;
 }
 
 
-void rmmp_pprof_serialize_add_strtab(struct pprof_serialize_state *state, st_table *strtab) {
+void rmmp_pprof_serialize_add_strtab(struct pprof_serialize_state *state, struct str_intern_tab_index *strtab_ix) {
     try {
-        rmmp_pprof_serialize_add_strtab_impl(state, strtab);
+        rmmp_pprof_serialize_add_strtab_impl(state, strtab_ix);
     } catch (...) {
 
     }
@@ -125,9 +118,9 @@ static void rmmp_pprof_serialize_add_alloc_samples_impl(struct pprof_serialize_s
                 fn = fnit->second;
             } else {
                 fn.set_id(frame.function_id);
-                fn.set_filename(static_cast<int64_t>(s->bt_frames[i].filename));
-                fn.set_name(static_cast<int64_t>(s->bt_frames[i].function_name));
-                fn.set_system_name(static_cast<int64_t>(s->bt_frames[i].function_name));
+                fn.set_filename(mpp_strtab_index_of(state->strtab_ix, s->bt_frames[i].filename));
+                fn.set_name(mpp_strtab_index_of(state->strtab_ix, s->bt_frames[i].function_name));
+                fn.set_system_name(mpp_strtab_index_of(state->strtab_ix, s->bt_frames[i].function_name));
                 function_tab.insert({frame.function_id, fn});
             }
 

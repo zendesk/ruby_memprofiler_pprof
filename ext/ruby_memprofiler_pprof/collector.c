@@ -8,8 +8,7 @@
 #include <vm_core.h>
 #include <iseq.h>
 
-#include "compat.h"
-#include "pprof_out.h"
+#include "ruby_memprofiler_pprof.h"
 
 
 static rb_callable_method_entry_t *
@@ -69,19 +68,15 @@ struct collector_cdata {
     struct internal_sample *samples;    // Head of a linked list of samples
     size_t sample_count;                // Number of elements currently in the sample list
 
-    st_table *string_tab;               // String interning table
-    size_t string_tab_count;            // Number of elements currently in the string intern tab.
-    char *string_tab_tmpbuf;            // A temporary buffer used as part of the string interning impl
-    size_t string_tab_tmpbuf_len;       // Length of string_tab_tmpbuf
-
+    struct str_intern_tab string_tab;   // String interning table
     VALUE native_cfunc_str;             // Retained VALUE representation of "(native cfunc)"
 };
 
 static void internal_sample_decrement_refcount(struct internal_sample *s) {
     s->refcount--;
     if (!s->refcount) {
-        rmmp_free(s->bt_frames);
-        rmmp_free(s);
+        mpp_free(s->bt_frames);
+        mpp_free(s);
     }
 }
 
@@ -125,33 +120,10 @@ static int collector_cdata_gc_memsize_live_objects(st_data_t key, st_data_t valu
     return ST_CONTINUE;
 }
 
-static int collector_cdata_gc_free_strtab_items(st_data_t key, st_data_t value, st_data_t arg) {
-    struct string_tab_el *el = (struct string_tab_el *)value;
-    rmmp_free(el->str);
-    rmmp_free(el);
-    return ST_CONTINUE;
-}
-
 static void collector_cdata_gc_free_strtab(struct collector_cdata *cd) {
-    if (cd->string_tab) {
-        rb_st_foreach(cd->string_tab, collector_cdata_gc_free_strtab_items, 0);
-        rb_st_free_table(cd->string_tab);
+    if (cd->string_tab.initialized) {
+        mpp_strtab_destroy(&cd->string_tab);
     }
-    if (cd->string_tab_tmpbuf) {
-        rmmp_free(cd->string_tab_tmpbuf);
-    }
-    cd->string_tab = NULL;
-    cd->string_tab_tmpbuf = NULL;
-    cd->string_tab_tmpbuf_len = 0;
-}
-
-static int collector_cdata_gc_memsize_strtab_items(st_data_t key, st_data_t value, st_data_t arg) {
-    size_t *acc_ptr = (size_t *)arg;
-    struct string_tab_el *el = (struct string_tab_el *)value;
-
-    *acc_ptr += sizeof(*el);
-    *acc_ptr += el->str_len + 1;
-    return ST_CONTINUE;
 }
 
 static void collector_cdata_gc_mark(void *ptr) {
@@ -173,14 +145,14 @@ static void collector_cdata_gc_free(void *ptr) {
     }
 
     // Needed in case there are any in-flight tracepoints we just disabled above.
-    rmmp_pthread_mutex_lock(&cd->lock);
+    mpp_pthread_mutex_lock(&cd->lock);
 
     collector_cdata_gc_free_live_object_table(cd);
     collector_cdata_gc_decrement_sample_refcounts(cd);
     collector_cdata_gc_free_strtab(cd);
 
-    rmmp_pthread_mutex_unlock(&cd->lock);
-    rmmp_pthread_mutex_destroy(&cd->lock);
+    mpp_pthread_mutex_unlock(&cd->lock);
+    mpp_pthread_mutex_destroy(&cd->lock);
 
     ruby_xfree(ptr);
 }
@@ -192,9 +164,8 @@ static size_t collector_cdata_memsize(const void *ptr) {
         rb_st_foreach(cd->live_objects, collector_cdata_gc_memsize_live_objects, (st_data_t)&sz);
         sz += rb_st_memsize(cd->live_objects);
     }
-    if (cd->string_tab) {
-        rb_st_foreach(cd->string_tab, collector_cdata_gc_memsize_strtab_items, (st_data_t)&sz);
-        sz += rb_st_memsize(cd->string_tab);
+    if (cd->string_tab.initialized) {
+        sz += mpp_strtab_memsize(&cd->string_tab);
     }
     struct internal_sample *s = cd->samples;
     while (s) {
@@ -202,7 +173,6 @@ static size_t collector_cdata_memsize(const void *ptr) {
         sz += s->bt_frames_count * sizeof(*s->bt_frames);
         s = s->next_alloc;
     }
-    sz += cd->string_tab_tmpbuf_len;
 
     return sz;
 }
@@ -235,22 +205,6 @@ static struct collector_cdata *collector_cdata_get(VALUE self) {
     return a;
 }
 
-static void collector_initialize_string_tab(struct collector_cdata *cd) {
-    cd->string_tab_tmpbuf = NULL;
-    cd->string_tab_tmpbuf_len = 0;
-    cd->string_tab = rb_st_init_strtable();
-
-    // Need to initialize the empty string as element zero.
-    struct string_tab_el *empty_val = rmmp_xcalloc(sizeof(struct string_tab_el));
-    empty_val->index = 0;
-    empty_val->str = rmmp_xcalloc(1);
-    empty_val->str[0] = '\0';
-    empty_val->str_len = 0;
-    rb_st_insert(cd->string_tab, (st_data_t)"", (st_data_t)empty_val);
-
-    // There is one element, the zero value.
-    cd->string_tab_count = 1;
-}
 
 static VALUE collector_alloc(VALUE klass) {
     struct collector_cdata *cd;
@@ -262,60 +216,12 @@ static VALUE collector_alloc(VALUE klass) {
     cd->samples = NULL;
     cd->sample_count = 0;
     cd->live_objects = NULL;
-    cd->string_tab = NULL;
-    cd->string_tab_count = 0;
-    cd->string_tab_tmpbuf = NULL;
-    cd->string_tab_tmpbuf_len = 0;
+    memset(&cd->string_tab, 0, sizeof(cd->string_tab));
     __atomic_store_n(&cd->u32_sample_rate, 0, __ATOMIC_SEQ_CST);
     cd->native_cfunc_str = rb_str_new_cstr("(native cfunc)");
-    rmmp_pthread_mutex_init(&cd->lock, 0);
+    mpp_pthread_mutex_init(&cd->lock, 0);
 
     return v;
-}
-
-static uint64_t collector_intern_ruby_str(struct collector_cdata *cd, VALUE str) {
-    if (!RTEST(str)) {
-        return 0;
-    }
-    if (RSTRING_LEN(str) == 0) {
-        return 0;
-    }
-
-    // This little dance is needed all the time, because RSTRING_PTR(str) is null
-    // terminated, but st_hash requires that the things we use as its keys are null
-    // terminated.... so we have to copy the string somewhere so we can add a null
-    // terminator to it.
-    // That "somewhere" is cd->string_tab_tmpbuf_len.
-    // If we find the string is already interned, this buffer can be re-used for
-    // the next call to this function.
-    if (cd->string_tab_tmpbuf_len < (size_t)(RSTRING_LEN(str) + 1)) {
-        rmmp_free(cd->string_tab_tmpbuf);
-        cd->string_tab_tmpbuf = NULL;
-    }
-    if (!cd->string_tab_tmpbuf) {
-        cd->string_tab_tmpbuf_len = RSTRING_LEN(str) + 1;
-        cd->string_tab_tmpbuf = rmmp_xcalloc(cd->string_tab_tmpbuf_len);
-    }
-    memcpy(cd->string_tab_tmpbuf, RSTRING_PTR(str), RSTRING_LEN(str));
-    cd->string_tab_tmpbuf[RSTRING_LEN(str)] = '\0';
-
-    struct string_tab_el *interned_value;
-    if(rb_st_lookup(cd->string_tab, (st_data_t)cd->string_tab_tmpbuf, (st_data_t *)&interned_value)) {
-        return interned_value->index;
-    }
-
-    // Not present - need to add it to the table.
-    interned_value = rmmp_xcalloc(sizeof(struct string_tab_el));
-    interned_value->index = cd->string_tab_count++;
-    interned_value->str = cd->string_tab_tmpbuf;
-    interned_value->str_len = RSTRING_LEN(str);
-    rb_st_insert(cd->string_tab, (st_data_t)interned_value->str, (st_data_t)interned_value);
-
-    // We consumed the temp buffer.
-    cd->string_tab_tmpbuf = NULL;
-    cd->string_tab_tmpbuf_len = 0;
-
-    return interned_value->index;
 }
 
 struct newobj_impl_args {
@@ -331,7 +237,7 @@ static VALUE collector_tphook_newobj_impl(VALUE args_as_uintptr) {
     VALUE newobj = rb_tracearg_object(tparg);
 
     // Create the sample object.
-    struct internal_sample *sample = rmmp_xcalloc(sizeof(struct internal_sample));
+    struct internal_sample *sample = mpp_xmalloc(sizeof(struct internal_sample));
 
     // Take inspiration from vm_backtrace.c's backtrace_each to iterate through the backtrace frames.
     const rb_control_frame_t *last_cfp = GET_EC()->cfp;
@@ -350,7 +256,7 @@ static VALUE collector_tphook_newobj_impl(VALUE args_as_uintptr) {
         backtrace_size = start_cfp - last_cfp + 1;
     }
 
-    sample->bt_frames = rmmp_xcalloc(sizeof(struct internal_sample_bt_frame) * backtrace_size);
+    sample->bt_frames = mpp_xmalloc(sizeof(struct internal_sample_bt_frame) * backtrace_size);
     sample->bt_frames_count = 0; // Will be incremented.
 
     ptrdiff_t i;
@@ -405,8 +311,8 @@ static VALUE collector_tphook_newobj_impl(VALUE args_as_uintptr) {
             uint64_t location_id = (lineno << 48)  | (FIX2ULONG(method_name) & 0xFFFFFFFFFFFF0000);
             if (location_id) {
                 size_t frame_ix = sample->bt_frames_count;
-                sample->bt_frames[frame_ix].filename = collector_intern_ruby_str(cd, filepath_val);
-                sample->bt_frames[frame_ix].function_name = collector_intern_ruby_str(cd, method_name);
+                mpp_strtab_intern_rbstr(&cd->string_tab, filepath_val, &sample->bt_frames[frame_ix].filename, NULL);
+                mpp_strtab_intern_rbstr(&cd->string_tab, method_name, &sample->bt_frames[frame_ix].function_name, NULL);
                 sample->bt_frames[frame_ix].lineno = lineno;
                 sample->bt_frames[frame_ix].function_id = method_id;
                 sample->bt_frames[frame_ix].location_id = location_id;
@@ -436,13 +342,13 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     // random number check in C first. This will be the fast path in most executions of this method.
     // Also do it with an atomic because it's happening before the lock.
     uint32_t sample_rate = __atomic_load_n(&cd->u32_sample_rate, __ATOMIC_SEQ_CST);
-    if (rmm_pprof_rand() > sample_rate) {
+    if (mpp_rand() > sample_rate) {
        return;
     }
 
     // If we can't acquire the mutex (perhaps another ractor has it?), don't block! just skip this
     // sample.
-    if (rmmp_pthread_mutex_trylock(&cd->lock) != 0) {
+    if (mpp_pthread_mutex_trylock(&cd->lock) != 0) {
         return;
     }
 
@@ -467,7 +373,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
         rb_set_errinfo(original_errinfo);
     }
 
-    rmmp_pthread_mutex_unlock(&cd->lock);
+    mpp_pthread_mutex_unlock(&cd->lock);
 }
 
 static void collector_tphook_freeobj(VALUE tpval, void *data) {
@@ -475,7 +381,7 @@ static void collector_tphook_freeobj(VALUE tpval, void *data) {
 
     // We unfortunately do really need the mutex here, because if we don't handle this, we might
     // leave an allocation kicking around in live_objects that has been freed.
-    rmmp_pthread_mutex_lock(&cd->lock);
+    mpp_pthread_mutex_lock(&cd->lock);
 
     // Definitely do _NOT_ try and run any Ruby code in here. Any allocation will crash
     // the process.
@@ -488,13 +394,13 @@ static void collector_tphook_freeobj(VALUE tpval, void *data) {
         internal_sample_decrement_refcount(sample);
     }
 
-    rmmp_pthread_mutex_unlock(&cd->lock);
+    mpp_pthread_mutex_unlock(&cd->lock);
 }
 
 static VALUE collector_enable_profiling_cimpl(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
 
-    rmmp_pthread_mutex_lock(&cd->lock);
+    mpp_pthread_mutex_lock(&cd->lock);
 
     collector_cdata_gc_free_live_object_table(cd);
     collector_cdata_gc_decrement_sample_refcounts(cd);
@@ -503,7 +409,7 @@ static VALUE collector_enable_profiling_cimpl(VALUE self) {
     cd->samples = NULL;
     cd->sample_count = 0;
     cd->live_objects = st_init_numtable();
-    collector_initialize_string_tab(cd);
+    mpp_strtab_init(&cd->string_tab);
 
     if (cd->newobj_trace == Qnil) {
         cd->newobj_trace = rb_tracepoint_new(
@@ -519,7 +425,7 @@ static VALUE collector_enable_profiling_cimpl(VALUE self) {
     rb_tracepoint_enable(cd->freeobj_trace);
     cd->is_tracing = 1;
 
-    rmmp_pthread_mutex_unlock(&cd->lock);
+    mpp_pthread_mutex_unlock(&cd->lock);
 
     return Qnil;
 }
@@ -527,7 +433,7 @@ static VALUE collector_enable_profiling_cimpl(VALUE self) {
 static VALUE collector_disable_profiling_cimpl(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
 
-    rmmp_pthread_mutex_lock(&cd->lock);
+    mpp_pthread_mutex_lock(&cd->lock);
 
     rb_tracepoint_disable(cd->newobj_trace);
     rb_tracepoint_disable(cd->freeobj_trace);
@@ -535,7 +441,7 @@ static VALUE collector_disable_profiling_cimpl(VALUE self) {
 
     // Don't clear any of our buffers - it's OK to access the profiling info after calling disable_profiling!
 
-    rmmp_pthread_mutex_unlock(&cd->lock);
+    mpp_pthread_mutex_unlock(&cd->lock);
 
 
     return Qnil;
@@ -558,9 +464,9 @@ static VALUE collector_set_sample_rate_cimpl(VALUE self, VALUE new_sample_rate_v
 
 static VALUE collector_get_running_cimpl(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
-    rmmp_pthread_mutex_lock(&cd->lock);
+    mpp_pthread_mutex_lock(&cd->lock);
     int running = cd->is_tracing;
-    rmmp_pthread_mutex_unlock(&cd->lock);
+    mpp_pthread_mutex_unlock(&cd->lock);
     return running ? Qtrue : Qfalse;
 }
 
@@ -568,17 +474,19 @@ static VALUE collector_rotate_profile_cimpl(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
 
     // Whilst under the GVL, we need to get the collector lock
-    rmmp_pthread_mutex_lock(&cd->lock);
+    mpp_pthread_mutex_lock(&cd->lock);
 
     // TODO: yield the GVL here.
     struct pprof_serialize_state *state = rmmp_pprof_serialize_init();
-    rmmp_pprof_serialize_add_strtab(state, cd->string_tab);
+    struct str_intern_tab_index strtab_ix;
+    mpp_strtab_index(&cd->string_tab, &strtab_ix);
+    rmmp_pprof_serialize_add_strtab(state, &strtab_ix);
 
     struct internal_sample *sample_list = cd->samples;
     cd->samples = NULL;
     // Now that we have the samples (and have processed the stringtab) we can
     // yield the lock.
-    rmmp_pthread_mutex_unlock(&cd->lock);
+    mpp_pthread_mutex_unlock(&cd->lock);
 
     rmmp_pprof_serialize_add_alloc_samples(state, sample_list);
     internal_sample_list_decrement_refcount(sample_list);
@@ -593,6 +501,7 @@ static VALUE collector_rotate_profile_cimpl(VALUE self) {
     VALUE retstring = rb_str_new(outbuf, outbuf_len);
 
     rmmp_pprof_serialize_destroy(state);
+    mpp_strtab_index_destroy(&strtab_ix);
     return retstring;
 }
 
@@ -609,7 +518,7 @@ void setup_collector_class() {
 }
 
 void Init_ruby_memprofiler_pprof_ext() {
-    rmm_pprof_rand_init();
+    mpp_rand_init();
     rb_ext_ractor_safe(true);
     mMemprofilerPprof = rb_define_module("MemprofilerPprof");
     setup_collector_class();
