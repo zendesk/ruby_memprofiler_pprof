@@ -101,43 +101,54 @@ void rmmp_pprof_serialize_add_strtab(struct pprof_serialize_state *state, struct
     }
 }
 
-static void rmmp_pprof_serialize_add_alloc_samples_impl(struct pprof_serialize_state *state, struct internal_sample *sample_list) {
-    struct internal_sample *s = sample_list;
+static void rmmp_pprof_serialize_add_alloc_samples_impl(struct pprof_serialize_state *state, struct mpp_sample *sample_list) {
+    struct mpp_sample *s = sample_list;
     std::unordered_map<uint64_t, perftools::profiles::Function> function_tab;
     std::unordered_map<uint64_t, perftools::profiles::Location> location_tab;
 
     while (s) {
         perftools::profiles::Sample sample_pb;
-        sample_pb.mutable_location_id()->Reserve(static_cast<int>(s->bt_frames_count));
-        for (int i = s->bt_frames_count - 1; i >= 0; i--) {
-            struct internal_sample_bt_frame frame = s->bt_frames[i];
+        sample_pb.mutable_location_id()->Reserve(static_cast<int>(s->bt.frames_count));
 
-            auto fnit = function_tab.find(frame.function_id);
-            perftools::profiles::Function fn;
-            if (fnit != function_tab.end()) {
-                fn = fnit->second;
-            } else {
-                fn.set_id(frame.function_id);
-                fn.set_filename(mpp_strtab_index_of(state->strtab_ix, s->bt_frames[i].filename));
-                fn.set_name(mpp_strtab_index_of(state->strtab_ix, s->bt_frames[i].function_name));
-                fn.set_system_name(mpp_strtab_index_of(state->strtab_ix, s->bt_frames[i].function_name));
-                function_tab.insert({frame.function_id, fn});
+        // Using an ordinary for loop here can't work because we have to go backwards, and size_t is unsigned.
+        if (s->bt.frames_count) {
+            size_t i = s->bt.frames_count - 1;
+            while (true) {
+                struct mpp_rb_backtrace_frame frame = s->bt.frames[i];
+
+                auto fnit = function_tab.find(frame.function_id);
+                perftools::profiles::Function fn;
+                if (fnit != function_tab.end()) {
+                    fn = fnit->second;
+                } else {
+                    fn.set_id(frame.function_id);
+                    fn.set_filename(mpp_strtab_index_of(state->strtab_ix, s->bt.frames[i].filename));
+                    fn.set_name(mpp_strtab_index_of(state->strtab_ix, s->bt.frames[i].function_name));
+                    fn.set_system_name(mpp_strtab_index_of(state->strtab_ix, s->bt.frames[i].function_name));
+                    function_tab.insert({frame.function_id, fn});
+                }
+
+                auto locit = location_tab.find(frame.location_id);
+                perftools::profiles::Location loc;
+                if (locit != location_tab.end()) {
+                    loc = locit->second;
+                } else {
+                    loc.set_id(frame.location_id);
+                    perftools::profiles::Line ln;
+                    ln.set_function_id(frame.function_id);
+                    ln.set_line(static_cast<int64_t>(frame.line_number));
+                    loc.mutable_line()->Add()->CopyFrom(ln);
+                    location_tab.insert({frame.location_id, loc});
+                }
+
+                sample_pb.mutable_location_id()->Add(frame.location_id);
+
+                if (i == 0) {
+                    break;
+                } else {
+                    i--;
+                }
             }
-
-            auto locit = location_tab.find(frame.location_id);
-            perftools::profiles::Location loc;
-            if (locit != location_tab.end()) {
-                loc = locit->second;
-            } else {
-                loc.set_id(frame.location_id);
-                perftools::profiles::Line ln;
-                ln.set_function_id(frame.function_id);
-                ln.set_line(static_cast<int64_t>(frame.lineno));
-                loc.mutable_line()->Add()->CopyFrom(ln);
-                location_tab.insert({frame.location_id, loc});
-            }
-
-            sample_pb.mutable_location_id()->Add(frame.location_id);
         }
         sample_pb.mutable_value()->Add(1);
         state->prof_msg.mutable_sample()->Add()->CopyFrom(sample_pb);
@@ -162,7 +173,7 @@ static void rmmp_pprof_serialize_add_alloc_samples_impl(struct pprof_serialize_s
     state->prof_msg.mutable_sample_type()->Add()->CopyFrom(allocations_vt);
 }
 
-void rmmp_pprof_serialize_add_alloc_samples(struct pprof_serialize_state *state, struct internal_sample *sample_list) {
+void rmmp_pprof_serialize_add_alloc_samples(struct pprof_serialize_state *state, struct mpp_sample *sample_list) {
     try {
         rmmp_pprof_serialize_add_alloc_samples_impl(state, sample_list);
     } catch (...) {

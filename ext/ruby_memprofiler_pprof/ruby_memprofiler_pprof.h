@@ -46,25 +46,7 @@ int mpp_pthread_mutex_trylock(pthread_mutex_t *m);
 void mpp_pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *attr);
 void mpp_pthread_mutex_destroy(pthread_mutex_t *m);
 
-// ======= MAIN DATA STRUCTURE DECLARATIONS ========
-struct internal_sample_bt_frame {
-    const char *filename;           // Filename
-    uint64_t lineno;                // Line number
-    const char *function_name;      // Method name
-    uint64_t function_id;           // An opaque ID we will stuff in the pprof proto file for this fn
-    uint64_t location_id;           // An opaque ID we will stuff in the pprof proto file for this location.
-};
-
-struct internal_sample {
-    struct internal_sample_bt_frame *bt_frames; // Array of backtrace frames
-    size_t bt_frames_count;                     // Number of backtrace frames
-    int refcount;                               // Sample has a refcount - because it's used both in the heap profiling
-    //   and in the allocation profiling
-    struct internal_sample *next_alloc;         // Next element in the allocation profiling sample list. DO NOT use
-    //   this in the heap profiling table.
-};
-
-// ======= STRTAB DECLARATIONS ========
+// ======== STRTAB DECLARATIONS ========
 
 #define MPP_STRTAB_USE_STRLEN (-1)
 #define MPP_STRTAB_UNKNOWN_LITERAL "(unknown)"
@@ -153,6 +135,56 @@ int64_t mpp_strtab_index_of(struct str_intern_tab_index *ix, const char *interne
 typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size_t interned_str_len, void *ctx);
 void mpp_strtab_each(struct str_intern_tab_index *ix, mpp_strtab_each_fn fn, void *ctx);
 
+// ======== BACKTRACE DECLARATIONS ========
+struct mpp_rb_backtrace_frame {
+    // The (null-terminated, interned) filename. Might just be "(native code)" or such
+    // for C extensions. And its size, not including termination.
+    const char *filename;
+    size_t filename_len;
+    // Line number in the filename. Might be zero if we can't compute it, or for C
+    // extensions.
+    int64_t line_number;
+    // The (null terminated, interned) function name, and its size (not including termination)
+    const char *function_name;
+    size_t function_name_len;
+    // The (null terminated, interned) label name. This might be the same as the function
+    // name, or it might be something "block in <method>". And its size.
+    const char *label;
+    size_t label_len;
+    // A "function id". This is a value that is supposed to uniquely identify the function
+    // in this process, but has no meaning outside of the context of this particular process.
+    // See backtrace.c for a description of how this is computed.
+    uint64_t function_id;
+    // A "location id" - this is supposed to uniquely identify a line of code (within the
+    // context of this process, like function_id).
+    uint64_t location_id;
+};
+
+struct mpp_rb_backtrace {
+    // The array of frames - most recent call FIRST.
+    struct mpp_rb_backtrace_frame *frames;
+    size_t frames_count;
+    // Memory size of frames, which might actually be bigger than
+    // sizeof(struct mpp_rb_backtrace_frame) * frames_count
+    size_t memsize;
+};
+
+// Capture a (current) backtrace, and free it.
+// Note that the free function does NOT free the struct mpp_rb_backtrace itself.
+void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct str_intern_tab *strtab);
+void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt, struct str_intern_tab *strtab);
+size_t mpp_rb_backtrace_memsize(struct mpp_rb_backtrace *bt);
+
+// ======= MAIN DATA STRUCTURE DECLARATIONS ========
+struct mpp_sample {
+    // The backtrace for this sample
+    struct mpp_rb_backtrace bt;
+    // Sample has a refcount - because it's used both in the heap profiling and in the allocation profiling.
+    int refcount;
+    // Next element in the allocation profiling sample list. DO NOT use this in the heap profiling table.
+    struct mpp_sample *next_alloc;
+};
+
 // ======== PPROF SERIALIZATION ROUTINES ========
 
 // Forward-declare the struct, so that it's opaque to C land (in the C++ file, it will be defined as holdling
@@ -161,7 +193,7 @@ struct pprof_serialize_state;
 
 struct pprof_serialize_state *rmmp_pprof_serialize_init();
 void rmmp_pprof_serialize_add_strtab(struct pprof_serialize_state *state, struct str_intern_tab_index *strtab_ix);
-void rmmp_pprof_serialize_add_alloc_samples(struct pprof_serialize_state *state, struct internal_sample *sample_list);
+void rmmp_pprof_serialize_add_alloc_samples(struct pprof_serialize_state *state, struct mpp_sample *sample_list);
 void rmmp_pprof_serialize_to_memory(struct pprof_serialize_state *state, char **outbuf, size_t *outlen, int *abort_flag);
 void rmmp_pprof_serialize_destroy(struct pprof_serialize_state *state);
 

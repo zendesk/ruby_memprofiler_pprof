@@ -115,9 +115,9 @@ void mpp_strtab_destroy(struct str_intern_tab *tab) {
 
     // Now we can free the table elements themselves, and the memory they hold
     for (int64_t i = 0; i < table_loop_args.el_ary_len; i++) {
-        mpp_strtab_free_intern_tab_el(table_loop_args.el_ary[i]);
         tab->table_count--;
         tab->table_entry_size -= sizeof(struct str_intern_tab_el) + table_loop_args.el_ary[i]->str_len + 1;
+        mpp_strtab_free_intern_tab_el(table_loop_args.el_ary[i]);
     }
     mpp_free(table_loop_args.el_ary);
 
@@ -242,7 +242,7 @@ static void mpp_strtab_rbstr_to_tmpstr(VALUE rbstr, const char **str, int *str_l
 
 
 // Interns the Ruby string rbstr into the table, copying it to native memory if required. Writes the interned
-// pointer to a null-terminated c string *interned_str_out and and the length (not including null terminator)
+// pointer to a null-terminated c string *interned_str_out and the length (not including null terminator)
 // to *interned_str_len_out.
 // Notes:
 //     - This will work fine even if rbstr has NULLs in it.
@@ -278,9 +278,9 @@ static void mpp_strtab_release_by_key(struct str_intern_tab *tab, struct str_int
         rb_bug("ruby_memprofiler_pprof_ext: strtab: did not write the updated element to cb_args.el?");
     }
     if (cb_args.el->refcount == 0) {
-        mpp_strtab_free_intern_tab_el(cb_args.el);
         tab->table_count--;
         tab->table_entry_size -= sizeof(*cb_args.el) + cb_args.el->str_len + 1;
+        mpp_strtab_free_intern_tab_el(cb_args.el);
     }
 }
 

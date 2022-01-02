@@ -10,48 +10,6 @@
 
 #include "ruby_memprofiler_pprof.h"
 
-
-static rb_callable_method_entry_t *
-check_method_entry(VALUE obj, int can_be_svar)
-{
-    if (obj == Qfalse) return NULL;
-
-#if VM_CHECK_MODE > 0
-    if (!RB_TYPE_P(obj, T_IMEMO)) rb_bug("check_method_entry: unknown type: %s", rb_obj_info(obj));
-#endif
-
-    switch (imemo_type(obj)) {
-    case imemo_ment:
-        return (rb_callable_method_entry_t *)obj;
-    case imemo_cref:
-        return NULL;
-    case imemo_svar:
-        if (can_be_svar) {
-            return check_method_entry(((struct vm_svar *)obj)->cref_or_me, 0);
-        }
-    default:
-#if VM_CHECK_MODE > 0
-        rb_bug("check_method_entry: svar should not be there:");
-#endif
-        return NULL;
-    }
-}
-
-__attribute__(( visibility("hidden") ))
-const rb_callable_method_entry_t *
-rb_vm_frame_method_entry(const rb_control_frame_t *cfp)
-{
-    const VALUE *ep = cfp->ep;
-    rb_callable_method_entry_t *me;
-
-    while (!VM_ENV_LOCAL_P(ep)) {
-        if ((me = check_method_entry(ep[VM_ENV_DATA_INDEX_ME_CREF], 0)) != NULL) return me;
-        ep = VM_ENV_PREV_EP(ep);
-    }
-    return check_method_entry(ep[VM_ENV_DATA_INDEX_ME_CREF], 1);
-}
-
-
 static VALUE mMemprofilerPprof;
 static VALUE cCollector;
 
@@ -65,57 +23,58 @@ struct collector_cdata {
                                         //   getting GC'd.
 
     pthread_mutex_t lock;               // Internal lock for sample list
-    struct internal_sample *samples;    // Head of a linked list of samples
+    struct mpp_sample *samples;    // Head of a linked list of samples
     size_t sample_count;                // Number of elements currently in the sample list
 
     struct str_intern_tab string_tab;   // String interning table
     VALUE native_cfunc_str;             // Retained VALUE representation of "(native cfunc)"
 };
 
-static void internal_sample_decrement_refcount(struct internal_sample *s) {
+static void internal_sample_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
     s->refcount--;
     if (!s->refcount) {
-        mpp_free(s->bt_frames);
+        mpp_rb_backtrace_destroy(&s->bt, &cd->string_tab);
         mpp_free(s);
     }
 }
 
 static int collector_cdata_gc_decrement_live_object_refcounts(st_data_t key, st_data_t value, st_data_t arg) {
-    struct internal_sample *s = (struct internal_sample *)value;
-    internal_sample_decrement_refcount(s);
+    struct mpp_sample *s = (struct mpp_sample *)value;
+    struct collector_cdata *cd = (struct collector_cdata *)arg;
+    internal_sample_decrement_refcount(cd, s);
     return ST_CONTINUE;
 }
 
 static void collector_cdata_gc_free_live_object_table(struct collector_cdata *cd) {
     if (cd->live_objects) {
-        rb_st_foreach(cd->live_objects, collector_cdata_gc_decrement_live_object_refcounts, 0);
+        rb_st_foreach(cd->live_objects, collector_cdata_gc_decrement_live_object_refcounts, (st_data_t)cd);
         rb_st_free_table(cd->live_objects);
     }
     cd->live_objects = NULL;
 }
 
-static void internal_sample_list_decrement_refcount(struct internal_sample *s) {
+static void internal_sample_list_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
     while (s) {
-        struct internal_sample *next_s = s->next_alloc;
-        internal_sample_decrement_refcount(s);
+        struct mpp_sample *next_s = s->next_alloc;
+        internal_sample_decrement_refcount(cd, s);
         s = next_s;
     }
 }
 
 static void collector_cdata_gc_decrement_sample_refcounts(struct collector_cdata *cd) {
-    internal_sample_list_decrement_refcount(cd->samples);
+    internal_sample_list_decrement_refcount(cd, cd->samples);
     cd->samples = NULL;
 }
 
 static int collector_cdata_gc_memsize_live_objects(st_data_t key, st_data_t value, st_data_t arg) {
     size_t *acc_ptr = (size_t *)arg;
-    struct internal_sample *s = (struct internal_sample *)value;
+    struct mpp_sample *s = (struct mpp_sample *)value;
 
     // Only consider the live object list to be holding the backtrace, for accounting purposes, if it's
     // not also in the allocation sample list.
     if (s->refcount == 1) {
         *acc_ptr += sizeof(*s);
-        *acc_ptr += s->bt_frames_count * sizeof(*s->bt_frames);
+        *acc_ptr += mpp_rb_backtrace_memsize(&s->bt);
     }
     return ST_CONTINUE;
 }
@@ -167,10 +126,10 @@ static size_t collector_cdata_memsize(const void *ptr) {
     if (cd->string_tab.initialized) {
         sz += mpp_strtab_memsize(&cd->string_tab);
     }
-    struct internal_sample *s = cd->samples;
+    struct mpp_sample *s = cd->samples;
     while (s) {
         sz += sizeof(*s);
-        sz += s->bt_frames_count * sizeof(*s->bt_frames);
+        sz += mpp_rb_backtrace_memsize(&s->bt);
         s = s->next_alloc;
     }
 
@@ -237,99 +196,16 @@ static VALUE collector_tphook_newobj_impl(VALUE args_as_uintptr) {
     VALUE newobj = rb_tracearg_object(tparg);
 
     // Create the sample object.
-    struct internal_sample *sample = mpp_xmalloc(sizeof(struct internal_sample));
-
-    // Take inspiration from vm_backtrace.c's backtrace_each to iterate through the backtrace frames.
-    const rb_control_frame_t *last_cfp = GET_EC()->cfp;
-    const rb_control_frame_t *start_cfp = RUBY_VM_END_CONTROL_FRAME(GET_EC());
-
-    // Allegedly, according to vm_backtrace.c, we need to skip the first two control frames because they
-    // are "dummy frames", whatever that means.
-    start_cfp = RUBY_VM_NEXT_CONTROL_FRAME(start_cfp);
-    start_cfp = RUBY_VM_NEXT_CONTROL_FRAME(start_cfp);
-
-    // Calculate how many frames are in this backtrace.
-    ptrdiff_t backtrace_size;
-    if (start_cfp < last_cfp) {
-        backtrace_size = 0;
-    } else {
-        backtrace_size = start_cfp - last_cfp + 1;
-    }
-
-    sample->bt_frames = mpp_xmalloc(sizeof(struct internal_sample_bt_frame) * backtrace_size);
-    sample->bt_frames_count = 0; // Will be incremented.
-
-    ptrdiff_t i;
-    const rb_control_frame_t *cfp;
-    for (i = 0, cfp = start_cfp; i < backtrace_size; i++, cfp = RUBY_VM_NEXT_CONTROL_FRAME(cfp)) {
-        int found = 0;
-
-        uint64_t lineno;
-        VALUE filepath_val;
-        VALUE method_name;
-        uint64_t method_id;
-
-        if (cfp->iseq) {
-            if (cfp->pc) {
-                // I believe means this backtrace frame is ruby code
-
-                // These two lines are essentially calc_lineno
-                size_t iseq_pos = (size_t)(cfp->pc - cfp->iseq->body->iseq_encoded);
-                lineno = rb_iseq_line_no(cfp->iseq, iseq_pos);
-                filepath_val = rb_iseq_path(cfp->iseq);
-                method_name = rb_iseq_method_name(cfp->iseq);
-
-                // The method name RString should be the same one, so use its object ID
-                // as our method id.
-                method_id = FIX2ULONG(rb_obj_id(method_name));
-
-                found = 1;
-            }
-        } else if (RUBYVM_CFUNC_FRAME_P(cfp)) {
-            // I believe means that this backtrace frame is a call to a cfunc
-            const rb_callable_method_entry_t *me = rb_vm_frame_method_entry(cfp);
-
-            // The code in vm_backtrace.c actually just puts the previous file/line combo in the
-            // cfunc case. That seems confusing and pointless to me, so let's just go with a constant.
-            filepath_val = cd->native_cfunc_str;
-            method_name = rb_id2str(me->def->original_id);
-
-            // Use the sym ID for the cfunc (which is interned forever) as the method id..
-            method_id = me->def->original_id;
-
-            lineno = 0;
-
-            found = 1;
-        } else {
-            // No idea what this means. It's silently ignored in vm_backtrace.c. Guess we will too.
-        }
-
-        if (found) {
-            // Use the lower 48 bits of this (which is the sizeof an address on x86_64), + the line number
-            // in the top 16 bits, asd the "location id".
-            // For cfuncs, this will obviously just be the same as the method ID, which is fine.
-            uint64_t location_id = (lineno << 48)  | (FIX2ULONG(method_name) & 0xFFFFFFFFFFFF0000);
-            if (location_id) {
-                size_t frame_ix = sample->bt_frames_count;
-                mpp_strtab_intern_rbstr(&cd->string_tab, filepath_val, &sample->bt_frames[frame_ix].filename, NULL);
-                mpp_strtab_intern_rbstr(&cd->string_tab, method_name, &sample->bt_frames[frame_ix].function_name, NULL);
-                sample->bt_frames[frame_ix].lineno = lineno;
-                sample->bt_frames[frame_ix].function_id = method_id;
-                sample->bt_frames[frame_ix].location_id = location_id;
-                sample->bt_frames_count++;
-            }
-        }
-    }
-
+    struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
+    // Fill its backtrace
+    mpp_rb_backtrace_init(&sample->bt, &cd->string_tab);
     // Set the sample refcount to two. Once because it's going in the allocation sampling buffer,
     // and once because it's going in the heap profiling set.
     sample->refcount = 2;
-
     // Insert into allocation profiling list.
     // TODO: enforce a limit on how many things can go here.
     sample->next_alloc = cd->samples;
     cd->samples = sample;
-
     // And into the heap profiling list.
     rb_st_insert(cd->live_objects, newobj, (st_data_t)sample);
 
@@ -388,10 +264,10 @@ static void collector_tphook_freeobj(VALUE tpval, void *data) {
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
     VALUE freed_obj = rb_tracearg_object(tparg);
 
-    struct internal_sample *sample;
+    struct mpp_sample *sample;
     if (rb_st_delete(cd->live_objects, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
         // We deleted it out of live objects; decrement its refcount.
-        internal_sample_decrement_refcount(sample);
+        internal_sample_decrement_refcount(cd, sample);
     }
 
     mpp_pthread_mutex_unlock(&cd->lock);
@@ -482,14 +358,14 @@ static VALUE collector_rotate_profile_cimpl(VALUE self) {
     mpp_strtab_index(&cd->string_tab, &strtab_ix);
     rmmp_pprof_serialize_add_strtab(state, &strtab_ix);
 
-    struct internal_sample *sample_list = cd->samples;
+    struct mpp_sample *sample_list = cd->samples;
     cd->samples = NULL;
     // Now that we have the samples (and have processed the stringtab) we can
     // yield the lock.
     mpp_pthread_mutex_unlock(&cd->lock);
 
     rmmp_pprof_serialize_add_alloc_samples(state, sample_list);
-    internal_sample_list_decrement_refcount(sample_list);
+    internal_sample_list_decrement_refcount(cd, sample_list);
 
 
     char *outbuf;
