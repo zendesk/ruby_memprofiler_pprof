@@ -22,17 +22,16 @@ struct collector_cdata {
                                         //   getting GC'd.
 
     pthread_mutex_t lock;               // Internal lock for sample list
-    struct mpp_sample *samples;    // Head of a linked list of samples
+    struct mpp_sample *samples;         // Head of a linked list of samples
     size_t sample_count;                // Number of elements currently in the sample list
 
-    struct mpp_strtab string_tab;   // String interning table
-    VALUE native_cfunc_str;             // Retained VALUE representation of "(native cfunc)"
+    struct mpp_strtab *string_tab;      // String interning table
 };
 
 static void internal_sample_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
     s->refcount--;
     if (!s->refcount) {
-        mpp_rb_backtrace_destroy(&s->bt, &cd->string_tab);
+        mpp_rb_backtrace_destroy(&s->bt, cd->string_tab);
         mpp_free(s);
     }
 }
@@ -79,8 +78,8 @@ static int collector_cdata_gc_memsize_live_objects(st_data_t key, st_data_t valu
 }
 
 static void collector_cdata_gc_free_strtab(struct collector_cdata *cd) {
-    if (cd->string_tab.initialized) {
-        mpp_strtab_destroy(&cd->string_tab);
+    if (cd->string_tab) {
+        mpp_strtab_destroy(cd->string_tab);
     }
 }
 
@@ -88,7 +87,6 @@ static void collector_cdata_gc_mark(void *ptr) {
     struct collector_cdata *cd = (struct collector_cdata *)ptr;
     rb_gc_mark_movable(cd->newobj_trace);
     rb_gc_mark_movable(cd->freeobj_trace);
-    rb_gc_mark_movable(cd->native_cfunc_str);
 }
 
 static void collector_cdata_gc_free(void *ptr) {
@@ -122,8 +120,8 @@ static size_t collector_cdata_memsize(const void *ptr) {
         st_foreach(cd->live_objects, collector_cdata_gc_memsize_live_objects, (st_data_t)&sz);
         sz += st_memsize(cd->live_objects);
     }
-    if (cd->string_tab.initialized) {
-        sz += mpp_strtab_memsize(&cd->string_tab);
+    if (cd->string_tab) {
+        sz += mpp_strtab_memsize(cd->string_tab);
     }
     struct mpp_sample *s = cd->samples;
     while (s) {
@@ -141,7 +139,6 @@ static void collector_cdata_gc_compact(void *ptr) {
     struct collector_cdata *cd = (struct collector_cdata *)ptr;
     cd->newobj_trace = rb_gc_location(cd->newobj_trace);
     cd->freeobj_trace = rb_gc_location(cd->freeobj_trace);
-    cd->native_cfunc_str = rb_gc_location(cd->native_cfunc_str);
 }
 #endif
 
@@ -175,9 +172,8 @@ static VALUE collector_alloc(VALUE klass) {
     cd->samples = NULL;
     cd->sample_count = 0;
     cd->live_objects = NULL;
-    memset(&cd->string_tab, 0, sizeof(cd->string_tab));
+    cd->string_tab = NULL;
     __atomic_store_n(&cd->u32_sample_rate, 0, __ATOMIC_SEQ_CST);
-    cd->native_cfunc_str = rb_str_new_cstr("(native cfunc)");
     mpp_pthread_mutex_init(&cd->lock, 0);
 
     return v;
@@ -198,7 +194,7 @@ static VALUE collector_tphook_newobj_impl(VALUE args_as_uintptr) {
     // Create the sample object.
     struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
     // Fill its backtrace
-    mpp_rb_backtrace_init(&sample->bt, &cd->string_tab);
+    mpp_rb_backtrace_init(&sample->bt, cd->string_tab);
     // Set the sample refcount to two. Once because it's going in the allocation sampling buffer,
     // and once because it's going in the heap profiling set.
     sample->refcount = 2;
@@ -285,7 +281,7 @@ static VALUE collector_enable_profiling_cimpl(VALUE self) {
     cd->samples = NULL;
     cd->sample_count = 0;
     cd->live_objects = st_init_numtable();
-    mpp_strtab_init(&cd->string_tab);
+    cd->string_tab = mpp_strtab_new();
 
     if (cd->newobj_trace == Qnil) {
         cd->newobj_trace = rb_tracepoint_new(
@@ -359,7 +355,7 @@ static VALUE collector_rotate_profile_cimpl_prepresult(VALUE vargs) {
 
 static VALUE collector_rotate_profile_cimpl(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
-    struct mpp_pprof_serctx serctx;
+    struct mpp_pprof_serctx *serctx = NULL;
     char *buf_out;
     size_t buflen_out;
     char errbuf[256];
@@ -376,14 +372,15 @@ static VALUE collector_rotate_profile_cimpl(VALUE self) {
     // yield the lock.
     mpp_pthread_mutex_unlock(&cd->lock);
 
-    mpp_pprof_serctx_init(&serctx);
-    r = mpp_pprof_serctx_set_strtab(&serctx, &cd->string_tab, errbuf, sizeof(errbuf));
+    serctx = mpp_pprof_serctx_new();
+    MPP_ASSERT_MSG(serctx, "mpp_pprof_serctx_new failed??");
+    r = mpp_pprof_serctx_set_strtab(serctx, cd->string_tab, errbuf, sizeof(errbuf));
     if (r == -1) {
         goto out;
     }
     struct mpp_sample *s = sample_list;
     while (s) {
-        r = mpp_pprof_serctx_add_sample(&serctx, s, errbuf, sizeof(errbuf));
+        r = mpp_pprof_serctx_add_sample(serctx, s, errbuf, sizeof(errbuf));
         if (r == -1) {
             goto out;
         }
@@ -391,7 +388,7 @@ static VALUE collector_rotate_profile_cimpl(VALUE self) {
     }
 
 
-    r = mpp_pprof_serctx_serialize(&serctx, &buf_out, &buflen_out, errbuf, sizeof(errbuf));
+    r = mpp_pprof_serctx_serialize(serctx, &buf_out, &buflen_out, errbuf, sizeof(errbuf));
     if ( r == -1) {
         goto out;
     }
@@ -404,7 +401,9 @@ static VALUE collector_rotate_profile_cimpl(VALUE self) {
 
     // Do cleanup here now.
 out:
-    mpp_pprof_serctx_destroy(&serctx);
+    if (serctx) {
+        mpp_pprof_serctx_destroy(serctx);
+    }
 
     // Now return-or-raise back to ruby.
     if (jump_tag) {

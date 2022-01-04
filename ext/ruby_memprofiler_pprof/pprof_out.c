@@ -16,27 +16,28 @@ static void *mpp_pprof_upb_arena_malloc(upb_alloc *alloc, void *ptr, size_t olds
 }
 
 // Initialize an already-allocated serialization context.
-void mpp_pprof_serctx_init(struct mpp_pprof_serctx *ctx) {
+struct mpp_pprof_serctx *mpp_pprof_serctx_new() {
+    struct mpp_pprof_serctx *ctx = mpp_xmalloc(sizeof(struct mpp_pprof_serctx));
     ctx->allocator.func = mpp_pprof_upb_arena_malloc;
     ctx->arena = upb_arena_init(NULL, 0, &ctx->allocator);
     ctx->profile_proto = perftools_profiles_Profile_new(ctx->arena);
     ctx->added_functions = st_init_numtable();
     ctx->added_locations = st_init_numtable();
-    memset(&ctx->strindex, 0, sizeof(ctx->strindex));
-    ctx->initialized = 1;
+    ctx->strindex = NULL;
+    return ctx;
 }
 
 // Destroys the serialization context. After this call, any stringtab indexes it held
-// are released, and any memory from its internal state is freed. *ctx itself is _NOT_ freed;
-// if it is not stack allocated, freeing it is the responsibility of the caller.
+// are released, and any memory from its internal state is freed. *ctx itself is also
+// freed and must not be dereferenced after this.
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
-    if (!ctx->initialized) {
-        return;
-    }
     upb_arena_free(ctx->arena);
     st_free_table(ctx->added_functions);
     st_free_table(ctx->added_locations);
-    mpp_strtab_index_destroy(&ctx->strindex);
+    if (ctx->strindex) {
+        mpp_strtab_index_destroy(ctx->strindex);
+    }
+    mpp_free(ctx);
 }
 
 // This method is used to set the stringtab interning table used on the strings in the samples.
@@ -52,13 +53,14 @@ int mpp_pprof_serctx_set_strtab(
     );
     mpp_strtab_intern(strtab, "count", MPP_STRTAB_USE_STRLEN, &ctx->internstr_count, NULL);
 
-    mpp_strtab_index(strtab, &ctx->strindex);
+    ctx->strindex = mpp_strtab_index(strtab);
+    MPP_ASSERT_MSG(ctx->strindex, "mpp_strtab_index returned 0");
 
     upb_strview *stringtab_list_proto =
-        perftools_profiles_Profile_resize_string_table(ctx->profile_proto, ctx->strindex.str_list_len, ctx->arena);
-    for (int64_t i = 0; i < ctx->strindex.str_list_len; i++) {
+        perftools_profiles_Profile_resize_string_table(ctx->profile_proto, ctx->strindex->str_list_len, ctx->arena);
+    for (int64_t i = 0; i < ctx->strindex->str_list_len; i++) {
         upb_strview *stringtab_proto = &stringtab_list_proto[i];
-        struct mpp_strtab_el *intern_tab_el = ctx->strindex.str_list[i];
+        struct mpp_strtab_el *intern_tab_el = ctx->strindex->str_list[i];
         stringtab_proto->data = intern_tab_el->str;
         stringtab_proto->size = intern_tab_el->str_len;
     }
@@ -67,7 +69,7 @@ int mpp_pprof_serctx_set_strtab(
         perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
 #define VT_SET_STRINTERN_FIELD(field, str)                                                                  \
     do {                                                                                                    \
-        int64_t interned = mpp_strtab_index_of(&ctx->strindex, (str));                                      \
+        int64_t interned = mpp_strtab_index_of(ctx->strindex, (str));                                       \
         if (interned == -1) {                                                                               \
             ruby_snprintf(errbuf, errbuflen, "non-interned string %s passed for ValueType.#field", (str));  \
             return -1;                                                                                      \
@@ -96,7 +98,7 @@ static int mpp_pprof_serctx_add_function(
 
 #define FN_SET_STRINTERN_FIELD(field, str)                                                                  \
     do {                                                                                                    \
-        int64_t interned = mpp_strtab_index_of(&ctx->strindex, (str));                                      \
+        int64_t interned = mpp_strtab_index_of(ctx->strindex, (str));                                       \
         if (interned == -1) {                                                                               \
             ruby_snprintf(errbuf, errbuflen, "non-interned string %s passed for Function.#field", (str));   \
             return -1;                                                                                      \

@@ -84,19 +84,21 @@ static int mpp_strtab_table_decrement_el_refcount(st_data_t *key, st_data_t *val
     return el->refcount == 0 ? ST_DELETE : ST_CONTINUE;
 }
 
-// Configures an (already allocated) struct str_intern_tab.
-void mpp_strtab_init(struct mpp_strtab *tab) {
+// Allocates and configures a struct str_intern_tab.
+struct mpp_strtab *mpp_strtab_new() {
+    struct mpp_strtab *tab = mpp_xmalloc(sizeof(struct mpp_strtab));
     tab->table = st_init_table(&mpp_strtab_hash_type);
     tab->table_count = 0;
     tab->table_entry_size = 0;
 
     // According to pprof rules, every string table needs ""
     mpp_strtab_intern(tab, "", 0, &tab->interned_empty_str, NULL);
-    tab->initialized = 1;
+
+    return tab;
 }
 
 // Immediately frees all memory held by *tab. After this call, any referneces to interned strings outside
-// of this module are dangling. Does NOT free tab itself.
+// of this module are dangling. Also frees *tab itself.
 void mpp_strtab_destroy(struct mpp_strtab *tab) {
 
     // We need to first copy all the elements of the table into an array, and _then_ remove them from the table,
@@ -119,8 +121,7 @@ void mpp_strtab_destroy(struct mpp_strtab *tab) {
 
     // And _now_ it's finally OK to delete the table itself.
     st_free_table(tab->table);
-
-    tab->initialized = 0;
+    mpp_free(tab);
 }
 
 // Get the memory size of the table, for use in reporting the struct memsize to Ruby.
@@ -306,7 +307,9 @@ void mpp_strtab_release_rbstr(struct mpp_strtab *tab, VALUE rbstr) {
 // Once the index structure is created, it is safe to use this structure concurrently with the
 // table itself (i.e. so samples can continue to be collected in the profiler).
 // Note that it is NOT safe to destroy the index concurrently with table use however.
-void mpp_strtab_index(struct mpp_strtab *tab, struct mpp_strtab_index *ix) {
+struct mpp_strtab_index *mpp_strtab_index(struct mpp_strtab *tab) {
+    struct mpp_strtab_index *ix = mpp_xmalloc(sizeof(struct mpp_strtab_index));
+
     // Accumulate a pointer to every element.
     struct mpp_strtab_table_extract_els_args table_loop_args;
     table_loop_args.should_delete = 0;
@@ -348,6 +351,8 @@ void mpp_strtab_index(struct mpp_strtab *tab, struct mpp_strtab_index *ix) {
     // st_insert also does update!
     st_insert(ix->pos_table, (st_data_t)tab->interned_empty_str, 0);
     st_insert(ix->pos_table, (st_data_t)tmp->str, emptystr_index);
+
+    return ix;
 }
 
 // Destroys a previously created index. Must not be called concurrently with any other method on

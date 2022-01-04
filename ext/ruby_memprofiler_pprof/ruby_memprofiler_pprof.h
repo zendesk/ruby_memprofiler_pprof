@@ -100,8 +100,6 @@ struct mpp_strtab_el {
 };
 
 struct mpp_strtab {
-    // 1 if the table is initialized, else zero
-    int initialized;
     // The actual table which contains a mapping of (string hash) -> (str_intern_tab_el *)
     st_table *table;
     // Number of entries in table.
@@ -128,11 +126,11 @@ struct mpp_strtab_index {
 // NOTE - there's better documentation of what these methods do in strtab.c itself.
 
 // Initializes a new, empty string intern table. This will allocate memory that remains owned by the strtab
-// module and saves it in tab. It does _not_ allocate memory for struct intern_tab itself.
-void mpp_strtab_init(struct mpp_strtab *tab);
+// module and saves it in tab. It also allocates memory for struct intern_tab itself.
+struct mpp_strtab *mpp_strtab_new();
 
-// Destroys a string intern table, including freeing the underlying memory used by tab, but NOT freeing
-// any memory pointed to by tab itself.
+// Destroys a string intern table, including freeing the underlying memory used by tab, and freeing
+// the memory pointed to by tab itself.
 void mpp_strtab_destroy(struct mpp_strtab *tab);
 
 // Get the size of all memory used by the table
@@ -154,7 +152,7 @@ void mpp_strtab_release_rbstr(struct mpp_strtab *tab, VALUE rbstr);
 
 // Methods for building a zero=-based list of interned pointers, for building the final string table
 // in the pprof protobuf.
-void mpp_strtab_index(struct mpp_strtab *tab, struct mpp_strtab_index *ix);
+struct mpp_strtab_index *mpp_strtab_index(struct mpp_strtab *tab);
 void mpp_strtab_index_destroy(struct mpp_strtab_index *ix);
 int64_t mpp_strtab_index_of(struct mpp_strtab_index *ix, const char *interned_ptr);
 typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size_t interned_str_len, void *ctx);
@@ -212,8 +210,6 @@ struct mpp_sample {
 
 // ======== PROTO SERIALIZATION ROUTINES ========
 struct mpp_pprof_serctx {
-    // 1 if has been initialized, else zero
-    int initialized;
     // Defines the allocation routine & memory arena used by this serialisation context. When the ctx
     // is destroyed, we free the entire arena, so no other (protobuf) memory needs to be individually
     // freed.
@@ -221,7 +217,7 @@ struct mpp_pprof_serctx {
     upb_arena *arena;
     // String intern index; recall that holding this object does _not_ require that we have exclusive
     // use of the underlying string intern table, so it's safe for us to use this in a separate thread.
-    struct mpp_strtab_index strindex;
+    struct mpp_strtab_index *strindex;
     // Mapping of (uint64_t) -> 0 (so basically a set) for whether function & location IDs have already
     // been inserted into *profile_proto
     st_table *added_functions;
@@ -236,7 +232,7 @@ struct mpp_pprof_serctx {
     const char *internstr_count;
 };
 
-void mpp_pprof_serctx_init(struct mpp_pprof_serctx *ctx);
+struct mpp_pprof_serctx *mpp_pprof_serctx_new();
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
 int mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct mpp_strtab *strtab, char *errbuf, size_t errbuflen);
 int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen);
