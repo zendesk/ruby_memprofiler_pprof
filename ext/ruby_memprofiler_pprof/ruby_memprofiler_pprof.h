@@ -58,15 +58,19 @@ void mpp_pthread_mutex_destroy(pthread_mutex_t *m);
 // the GVL, so this assertion macro has to be threadsafe. So we just implement it in pretty much a
 // similar way to how stdlib's assert() works (plus some stuff to prefix the gem name to the abort message
 // so users know who is at fault).
+#define MPP_ASSERT_STRINGIFY1(x) #x
+#define MPP_ASSERT_STRINGIFY2(x) MPP_ASSERT_STRINGIFY1(x)
+#define MPP_ASSERT__LINE MPP_ASSERT_STRINGIFY2(__LINE__)
 __attribute__ ((noreturn))
 void mpp_assert_fail(const char *msg, const char *assertion, const char *file, const char *line, const char *fn);
+#define MPP_ASSERT_MSG(expr, msg)                                                   \
+    do {                                                                            \
+        if ((expr) == 0) {                                                          \
+            mpp_assert_fail((msg), #expr, __FILE__, MPP_ASSERT__LINE, __func__);    \
+        }                                                                           \
+    } while (0)
 #define MPP_ASSERT_FAIL(expr) MPP_ASSERT_MSG(expr, 0)
-#define MPP_ASSERT_MSG(expr, msg)                                               \
-    do {                                                                        \
-        if ((expr) == 0) {                                                      \
-            mpp_assert_fail((msg), #expr, __FILE__, "##__LINE__##", __func__);  \
-        }                                                                       \
-    } while (0)                                                                 \
+
 // ======== STRTAB DECLARATIONS ========
 
 #define MPP_STRTAB_USE_STRLEN (-1)
