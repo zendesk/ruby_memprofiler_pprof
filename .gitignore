@@ -1,8 +1,3 @@
 *.so
 *.bundle
 tmp/
-
-# Don't check in these because they're not stable between versions of libprotobuf that would
-# otherwise work fine.
-ext/ruby_memprofiler_pprof/*.pb.cc
-ext/ruby_memprofiler_pprof/*.pb.h

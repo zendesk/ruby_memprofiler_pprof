@@ -139,7 +139,7 @@ void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct str_intern_tab *s
             // and the line number in the top 16 bits, as the "location id".
             // Guess this won't work reliably if your function has more than 16k lines, in which case...
             // ...just get a better function?
-            frame->location_id = (frame->line_number << 48)  | (FIX2ULONG(frame->function_id) & 0xFFFFFFFFFFFF0000);
+            frame->location_id = (frame->line_number << 48)  | (frame->function_id & 0x0000FFFFFFFFFFFF);
 
             bt->frames_count++;
         } else if (RUBYVM_CFUNC_FRAME_P(cfp)) {

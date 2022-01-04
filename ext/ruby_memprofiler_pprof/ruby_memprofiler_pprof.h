@@ -5,6 +5,8 @@
 #include <stdint.h>
 
 #include <ruby.h>
+#include "upb/upb/upb.h"
+#include "pprof.upb.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,9 +38,10 @@ uint32_t mpp_rand();
 void mpp_rand_init();
 
 
-// These declarations just wrap some things from the standard librar that should "always succeed", but call
+// These declarations just wrap some things from the standard library that should "always succeed", but call
 // rb_sys_fail() if they fail to abort the program.
 void *mpp_xmalloc(size_t sz);
+void *mpp_realloc(void *mem, size_t newsz);
 void mpp_free(void *mem);
 void mpp_pthread_mutex_lock(pthread_mutex_t *m);
 void mpp_pthread_mutex_unlock(pthread_mutex_t *m);
@@ -46,6 +49,19 @@ int mpp_pthread_mutex_trylock(pthread_mutex_t *m);
 void mpp_pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *attr);
 void mpp_pthread_mutex_destroy(pthread_mutex_t *m);
 
+// Need a handy assertion macro. It would be nice to re-use rb_bug for some of this, but that actually
+// requires the GVL (it walks the Ruby stack frames, for one) and we (want to) run some code outside
+// the GVL, so this assertion macro has to be threadsafe. So we just implement it in pretty much a
+// similar way to how stdlib's assert() works (plus some stuff to prefix the gem name to the abort message
+// so users know who is at fault).
+__attribute__ ((noreturn))
+void mpp_assert_fail(const char *msg, const char *assertion, const char *file, const char *line, const char *fn);
+#define MPP_ASSERT_MSG(expr, msg)                                               \
+    do {                                                                        \
+        if ((expr) == 0) {                                                      \
+            mpp_assert_fail((msg), #expr, __FILE__, "##__LINE__##", __func__);  \
+        }                                                                       \
+    } while (0)                                                                 \
 // ======== STRTAB DECLARATIONS ========
 
 #define MPP_STRTAB_USE_STRLEN (-1)
@@ -163,7 +179,7 @@ struct mpp_rb_backtrace_frame {
 struct mpp_rb_backtrace {
     // The array of frames - most recent call FIRST.
     struct mpp_rb_backtrace_frame *frames;
-    size_t frames_count;
+    int64_t frames_count;
     // Memory size of frames, which might actually be bigger than
     // sizeof(struct mpp_rb_backtrace_frame) * frames_count
     size_t memsize;
@@ -180,7 +196,7 @@ struct mpp_sample {
     // The backtrace for this sample
     struct mpp_rb_backtrace bt;
     // Sample has a refcount - because it's used both in the heap profiling and in the allocation profiling.
-    int refcount;
+    int64_t refcount;
     // Next element in the allocation profiling sample list. DO NOT use this in the heap profiling table.
     struct mpp_sample *next_alloc;
 };
@@ -197,6 +213,37 @@ void rmmp_pprof_serialize_add_alloc_samples(struct pprof_serialize_state *state,
 void rmmp_pprof_serialize_to_memory(struct pprof_serialize_state *state, char **outbuf, size_t *outlen, int *abort_flag);
 void rmmp_pprof_serialize_destroy(struct pprof_serialize_state *state);
 
+// ======== PROTO SERIALIZATION ROUTINES ========
+struct mpp_pprof_serctx {
+    // 1 if has been initialized, else zero
+    int initialized;
+    // Defines the allocation routine & memory arena used by this serialisation context. When the ctx
+    // is destroyed, we free the entire arena, so no other (protobuf) memory needs to be individually
+    // freed.
+    upb_alloc allocator;
+    upb_arena *arena;
+    // String intern index; recall that holding this object does _not_ require that we have exclusive
+    // use of the underlying string intern table, so it's safe for us to use this in a separate thread.
+    struct str_intern_tab_index strindex;
+    // Mapping of (uint64_t) -> 0 (so basically a set) for whether function & location IDs have already
+    // been inserted into *profile_proto
+    st_table *added_functions;
+    st_table *added_locations;
+    // The protobuf representation we are building up.
+    perftools_profiles_Profile *profile_proto;
+
+    // We need to keep interned copies of some strings that will wind up in the protobuf output.
+    // This is so that we can put constant values like "allocations" and "count" into our pprof output
+    // (the pprof format requires these strings to be in the string table along with the rest of them)
+    const char *internstr_allocations;
+    const char *internstr_count;
+};
+
+void mpp_pprof_serctx_init(struct mpp_pprof_serctx *ctx);
+void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
+void mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct str_intern_tab *strtab);
+void mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample);
+int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen);
 #ifdef __cplusplus
 }
 #endif

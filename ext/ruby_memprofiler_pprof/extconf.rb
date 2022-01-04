@@ -1,8 +1,7 @@
 require "mkmf"
 
 # Need -Wno-shorten-64-to-32 -Wno-sign-compare because the ubp generated protos warn on thse
-$CFLAGS << " -g -D_GNU_SOURCE -std=gnu11 -Wno-shorten-64-to-32 -Wno-sign-compare"
-$CXXFLAGS += " -g -D_GNU_SOURCE -std=gnu++17"
+$CFLAGS << " -g -D_GNU_SOURCE -DNDEBUG -std=gnu11 -Wno-shorten-64-to-32 -Wno-sign-compare"
 # Support GC.compact on Ruby >=- 2.7
 have_func("rb_gc_mark_movable", ["ruby.h"])
 

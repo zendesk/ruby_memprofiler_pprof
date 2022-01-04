@@ -346,39 +346,75 @@ static VALUE collector_get_running_cimpl(VALUE self) {
     return running ? Qtrue : Qfalse;
 }
 
+struct collector_rotate_profile_cimpl_prepresult_args {
+    int serialize_rval;
+    const char *errbuf;
+    const char *pprofbuf;
+    size_t pprofbuf_len;
+};
+
+static VALUE collector_rotate_profile_cimpl_prepresult(VALUE vargs) {
+    struct collector_rotate_profile_cimpl_prepresult_args *args =
+        (struct collector_rotate_profile_cimpl_prepresult_args *)vargs;
+
+    if (args->serialize_rval == 0) {
+        // Success case; copy the string into a ruby-land VALUE.
+        return rb_str_new(args->pprofbuf, args->pprofbuf_len);
+    } else {
+        // Failure case; throw an exception.
+        rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof failed serializing pprof protobuf: %s", args->errbuf);
+    }
+}
+
 static VALUE collector_rotate_profile_cimpl(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
+    struct mpp_pprof_serctx serctx;
+    char *buf_out;
+    size_t buflen_out;
+    char errbuf[256];
 
     // Whilst under the GVL, we need to get the collector lock
     mpp_pthread_mutex_lock(&cd->lock);
-
-    // TODO: yield the GVL here.
-    struct pprof_serialize_state *state = rmmp_pprof_serialize_init();
-    struct str_intern_tab_index strtab_ix;
-    mpp_strtab_index(&cd->string_tab, &strtab_ix);
-    rmmp_pprof_serialize_add_strtab(state, &strtab_ix);
 
     struct mpp_sample *sample_list = cd->samples;
     cd->samples = NULL;
     // Now that we have the samples (and have processed the stringtab) we can
     // yield the lock.
+    // TODO: yield the GVL here.
     mpp_pthread_mutex_unlock(&cd->lock);
 
-    rmmp_pprof_serialize_add_alloc_samples(state, sample_list);
-    internal_sample_list_decrement_refcount(cd, sample_list);
+    mpp_pprof_serctx_init(&serctx);
+    mpp_pprof_serctx_set_strtab(&serctx, &cd->string_tab);
+    struct mpp_sample *s = sample_list;
+    while (s) {
+        mpp_pprof_serctx_add_sample(&serctx, s);
+        s = s->next_alloc;
+    }
 
 
-    char *outbuf;
-    size_t outbuf_len;
-    int abort_flag = 0;
-    rmmp_pprof_serialize_to_memory(state, &outbuf, &outbuf_len, &abort_flag);
+    int rval = mpp_pprof_serctx_serialize(&serctx, &buf_out, &buflen_out, errbuf, sizeof(errbuf));
+    // TODO: Get the GVL back here.
 
-    // Copy the value back into ruby world.
-    VALUE retstring = rb_str_new(outbuf, outbuf_len);
+    // Annoyingly, since rb_str_new could (in theory) throw, we have to rb_protect the whole construction
+    // of our return value to ensure we don't leak serctx.
+    struct collector_rotate_profile_cimpl_prepresult_args prepresult_args;
+    prepresult_args.serialize_rval = rval;
+    prepresult_args.errbuf = errbuf;
+    prepresult_args.pprofbuf = buf_out;
+    prepresult_args.pprofbuf_len = buflen_out;
+    int jump_tag = 0;
+    VALUE retval = rb_protect(collector_rotate_profile_cimpl_prepresult, (VALUE)&prepresult_args, &jump_tag);
 
-    rmmp_pprof_serialize_destroy(state);
-    mpp_strtab_index_destroy(&strtab_ix);
-    return retstring;
+    // Do cleanup here now.
+    mpp_pprof_serctx_destroy(&serctx);
+
+    // Now return-or-raise back to ruby.
+    if (jump_tag) {
+        rb_jump_tag(jump_tag);
+    }
+    return retval;
+
+    RB_GC_GUARD(self);
 }
 
 void setup_collector_class() {
