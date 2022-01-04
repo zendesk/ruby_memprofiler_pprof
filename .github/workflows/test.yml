@@ -33,7 +33,7 @@ jobs:
           bundle install --jobs=3 --retry=3 --no-deployment
       - name: compile
         run: |
-          bundle exec rake compile
+          bundle exec rake compile WERROR=true VERBOSE=true
       - name: test
         run: |
           COVERAGE=true bundle exec rake test

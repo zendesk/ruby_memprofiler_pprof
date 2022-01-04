@@ -7,6 +7,10 @@ append_cflags([
   '-Wno-unknown-warning-option', # A bit tautalogical
 ])
 
+if ENV['WERROR'] == 'true'
+  append_cflags(['-Werror'])
+end
+
 # Support GC.compact on Ruby >=- 2.7
 have_func("rb_gc_mark_movable", ["ruby.h"])
 
@@ -48,4 +52,9 @@ File.open('Makefile', 'a') do |f|
     UPB_OBJS=upb.o #{upb_objs.join ' '}
     $(UPB_OBJS): CFLAGS += -Wno-shorten-64-to-32 -Wno-sign-compare -Wno-implicit-fallthrough -Wno-clobbered
   MAKEFILE
+
+  # Make Make automatically verbose if specified
+  if ENV['VERBOSE'] == 'true'
+    f.puts "V = 1"
+  end
 end
