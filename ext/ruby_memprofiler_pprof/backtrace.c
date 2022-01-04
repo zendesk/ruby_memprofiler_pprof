@@ -89,7 +89,7 @@ rb_vm_frame_method_entry(const rb_control_frame_t *cfp)
 // protobuf wants them, so they have to be reversed later. It's not so convenient to just capture it in
 // the correct order because we may have to skip some frames; thus if we filled in the frame array backwards,
 // we might not actually wind up filling frames[0].
-void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct str_intern_tab *strtab) {
+void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct mpp_strtab *strtab) {
     const rb_control_frame_t *last_cfp = GET_EC()->cfp;
     const rb_control_frame_t *start_cfp = RUBY_VM_END_CONTROL_FRAME(GET_EC());
 
@@ -170,7 +170,7 @@ void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct str_intern_tab *s
     }
 }
 
-void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt, struct str_intern_tab *strtab) {
+void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt, struct mpp_strtab *strtab) {
     // Decrement the refcount on each interned string.
     for (int64_t i = 0; i < bt->frames_count; i++) {
         struct mpp_rb_backtrace_frame *frame = &bt->frames[i];

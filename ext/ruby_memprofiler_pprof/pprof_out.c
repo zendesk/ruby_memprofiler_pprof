@@ -44,7 +44,7 @@ void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
 // a call to mpp_strtab_index; thus, after this method returns, it is safe for another thread to
 // continue using the stringtab because we have what we need in our index.
 int mpp_pprof_serctx_set_strtab(
-    struct mpp_pprof_serctx *ctx, struct str_intern_tab *strtab, char *errbuf, size_t errbuflen
+    struct mpp_pprof_serctx *ctx, struct mpp_strtab *strtab, char *errbuf, size_t errbuflen
 ) {
     // Intern some strings we'll need to produce our output
     mpp_strtab_intern(
@@ -58,7 +58,7 @@ int mpp_pprof_serctx_set_strtab(
         perftools_profiles_Profile_resize_string_table(ctx->profile_proto, ctx->strindex.str_list_len, ctx->arena);
     for (int64_t i = 0; i < ctx->strindex.str_list_len; i++) {
         upb_strview *stringtab_proto = &stringtab_list_proto[i];
-        struct str_intern_tab_el *intern_tab_el = ctx->strindex.str_list[i];
+        struct mpp_strtab_el *intern_tab_el = ctx->strindex.str_list[i];
         stringtab_proto->data = intern_tab_el->str;
         stringtab_proto->size = intern_tab_el->str_len;
     }

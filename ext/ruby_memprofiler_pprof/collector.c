@@ -25,7 +25,7 @@ struct collector_cdata {
     struct mpp_sample *samples;    // Head of a linked list of samples
     size_t sample_count;                // Number of elements currently in the sample list
 
-    struct str_intern_tab string_tab;   // String interning table
+    struct mpp_strtab string_tab;   // String interning table
     VALUE native_cfunc_str;             // Retained VALUE representation of "(native cfunc)"
 };
 

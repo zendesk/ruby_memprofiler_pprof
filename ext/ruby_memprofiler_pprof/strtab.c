@@ -6,8 +6,8 @@
 
 
 static int mpp_strtab_strcompare(st_data_t arg1, st_data_t arg2) {
-    struct str_intern_tab_key *k1 = (struct str_intern_tab_key *)arg1;
-    struct str_intern_tab_key *k2 = (struct str_intern_tab_key *)arg2;
+    struct mpp_strtab_key *k1 = (struct mpp_strtab_key *)arg1;
+    struct mpp_strtab_key *k2 = (struct mpp_strtab_key *)arg2;
 
     size_t smaller_len = (k1->str_len > k2->str_len) ? k2->str_len : k1->str_len;
     int cmp = memcmp(k1->str, k2->str, smaller_len);
@@ -23,7 +23,7 @@ static int mpp_strtab_strcompare(st_data_t arg1, st_data_t arg2) {
 }
 
 static st_index_t mpp_strtab_strhash(st_data_t arg) {
-    struct str_intern_tab_key *k = (struct str_intern_tab_key *)arg;
+    struct mpp_strtab_key *k = (struct mpp_strtab_key *)arg;
     return st_hash(k->str, k->str_len, FNV1_32A_INIT);
 }
 
@@ -33,13 +33,13 @@ static const struct st_hash_type mpp_strtab_hash_type = {
 };
 
 // Frees the memory associated with a single struct str_intern_tab_el
-static void mpp_strtab_free_intern_tab_el(struct str_intern_tab_el *el) {
+static void mpp_strtab_free_intern_tab_el(struct mpp_strtab_el *el) {
     mpp_free(el->str);
     mpp_free(el);
 }
 
 struct mpp_strtab_table_extract_els_args {
-    struct str_intern_tab_el **el_ary;
+    struct mpp_strtab_el **el_ary;
     int64_t el_ary_len;
     int64_t el_ary_cur_ix;
     int should_delete;
@@ -48,7 +48,7 @@ struct mpp_strtab_table_extract_els_args {
 // Used in rb_st_foreach to extract every table element to an array. If arg has should_delete set, then
 // this will also remove it from the table too.
 static int mpp_strtab_table_extract_els(st_data_t key, st_data_t value, st_data_t arg) {
-    struct str_intern_tab_el *el = (struct str_intern_tab_el *)value;
+    struct mpp_strtab_el *el = (struct mpp_strtab_el *)value;
     struct mpp_strtab_table_extract_els_args *args = (struct mpp_strtab_table_extract_els_args *)arg;
 
     MPP_ASSERT_MSG(
@@ -63,14 +63,14 @@ static int mpp_strtab_table_extract_els(st_data_t key, st_data_t value, st_data_
 }
 
 struct mpp_strtab_table_decrement_el_refcount_args {
-    struct str_intern_tab_el *el;
+    struct mpp_strtab_el *el;
 };
 
 // Used in rb_st_update to decrement the refcount of a table entry; if the refcount drops to zero, the
 // struct str_intern_tab_el is freed and the entry removed from the table.
 static int mpp_strtab_table_decrement_el_refcount(st_data_t *key, st_data_t *value, st_data_t arg, int existing) {
     MPP_ASSERT_MSG(existing && value, "strtab: attempted to decrement refcount on non-present element");
-    struct str_intern_tab_el *el = (struct str_intern_tab_el *)*value;
+    struct mpp_strtab_el *el = (struct mpp_strtab_el *)*value;
 
     // We need to store the value we are operating on back in the *args array, so our caller can free the element
     // if its refcount dropped to zero.
@@ -85,7 +85,7 @@ static int mpp_strtab_table_decrement_el_refcount(st_data_t *key, st_data_t *val
 }
 
 // Configures an (already allocated) struct str_intern_tab.
-void mpp_strtab_init(struct str_intern_tab *tab) {
+void mpp_strtab_init(struct mpp_strtab *tab) {
     tab->table = rb_st_init_table(&mpp_strtab_hash_type);
     tab->table_count = 0;
     tab->table_entry_size = 0;
@@ -97,7 +97,7 @@ void mpp_strtab_init(struct str_intern_tab *tab) {
 
 // Immediately frees all memory held by *tab. After this call, any referneces to interned strings outside
 // of this module are dangling. Does NOT free tab itself.
-void mpp_strtab_destroy(struct str_intern_tab *tab) {
+void mpp_strtab_destroy(struct mpp_strtab *tab) {
 
     // We need to first copy all the elements of the table into an array, and _then_ remove them from the table,
     // and only then free the elements. This is because we use the element str pointer as the key of the table,
@@ -106,13 +106,13 @@ void mpp_strtab_destroy(struct str_intern_tab *tab) {
     table_loop_args.should_delete = 1;
     table_loop_args.el_ary_cur_ix = 0;
     table_loop_args.el_ary_len = tab->table_count;
-    table_loop_args.el_ary = mpp_xmalloc(tab->table_count * sizeof(struct str_intern_tab_el *));
+    table_loop_args.el_ary = mpp_xmalloc(tab->table_count * sizeof(struct mpp_strtab_el *));
     rb_st_foreach(tab->table, mpp_strtab_table_extract_els, (st_data_t)&table_loop_args);
 
     // Now we can free the table elements themselves, and the memory they hold
     for (int64_t i = 0; i < table_loop_args.el_ary_len; i++) {
         tab->table_count--;
-        tab->table_entry_size -= sizeof(struct str_intern_tab_el) + table_loop_args.el_ary[i]->str_len + 1;
+        tab->table_entry_size -= sizeof(struct mpp_strtab_el) + table_loop_args.el_ary[i]->str_len + 1;
         mpp_strtab_free_intern_tab_el(table_loop_args.el_ary[i]);
     }
     mpp_free(table_loop_args.el_ary);
@@ -125,14 +125,14 @@ void mpp_strtab_destroy(struct str_intern_tab *tab) {
 
 // Get the memory size of the table, for use in reporting the struct memsize to Ruby.
 // Does NOT include sizeof(tab).
-size_t mpp_strtab_memsize(struct str_intern_tab *tab) {
+size_t mpp_strtab_memsize(struct mpp_strtab *tab) {
     return rb_st_memsize(tab->table) + tab->table_entry_size;
 }
 
 // Implementation for interning a string. Interns the string str, and writes the interned string pointer to
 // *interned_str_out and the length (not including null terminator) to *interned_str_len_out.
 static void mpp_strtab_intern_impl(
-    struct str_intern_tab *tab, const char *str, int str_len,
+    struct mpp_strtab *tab, const char *str, int str_len,
     const char **interned_str_out, size_t *interned_str_len_out
 ) {
     // Consider interning a NULL string as the same as an "" empty string.
@@ -141,8 +141,8 @@ static void mpp_strtab_intern_impl(
     }
 
     // First - is str already in the table?
-    struct str_intern_tab_el *interned_value;
-    struct str_intern_tab_key lookup_key = {
+    struct mpp_strtab_el *interned_value;
+    struct mpp_strtab_key lookup_key = {
         .str = str,
         .str_len = str_len,
     };
@@ -157,7 +157,7 @@ static void mpp_strtab_intern_impl(
     }
 
     // It's not - we need to intern it then.
-    interned_value = mpp_xmalloc(sizeof(struct str_intern_tab_el));
+    interned_value = mpp_xmalloc(sizeof(struct mpp_strtab_el));
     // We always intern a _copy_ of the string, so that the caller is free to dispose of str as they will.
     // We also null-terminate our copy, since that's convenient and free for us to do at this point.
     interned_value->str_len = str_len;
@@ -195,7 +195,7 @@ static void mpp_strtab_intern_impl(
 //     - The returned *interned_str_len_out is the length of *interned_str_out, NOT INCLUDING the null
 //       termination.
 void mpp_strtab_intern(
-    struct str_intern_tab *tab, const char *str, int str_len,
+    struct mpp_strtab *tab, const char *str, int str_len,
     const char **interned_str_out, size_t *interned_str_len_out
 ) {
     if (str_len == MPP_STRTAB_USE_STRLEN) {
@@ -252,7 +252,7 @@ static void mpp_strtab_rbstr_to_tmpstr(VALUE rbstr, const char **str, int *str_l
 //       termination.
 //     - This needs to be called under the GVL, obviously, because it's using Ruby VALUEs.
 void mpp_strtab_intern_rbstr(
-    struct str_intern_tab *tab, VALUE rbstr,
+    struct mpp_strtab *tab, VALUE rbstr,
     const char **interned_str_out, size_t *interned_str_len_out
 ) {
     const char *str;
@@ -261,7 +261,7 @@ void mpp_strtab_intern_rbstr(
     mpp_strtab_intern(tab, str, str_len, interned_str_out, interned_str_len_out);
 }
 
-static void mpp_strtab_release_by_key(struct str_intern_tab *tab, struct str_intern_tab_key lookup_key) {
+static void mpp_strtab_release_by_key(struct mpp_strtab *tab, struct mpp_strtab_key lookup_key) {
     struct mpp_strtab_table_decrement_el_refcount_args cb_args;
     cb_args.el = NULL;
     rb_st_update(tab->table, (st_data_t)&lookup_key, mpp_strtab_table_decrement_el_refcount, (st_data_t)&cb_args);
@@ -278,13 +278,13 @@ static void mpp_strtab_release_by_key(struct str_intern_tab *tab, struct str_int
 }
 
 // Releases a reference to the string str in the intern table;
-void mpp_strtab_release(struct str_intern_tab *tab, const char *str, size_t str_len) {
+void mpp_strtab_release(struct mpp_strtab *tab, const char *str, size_t str_len) {
     // Consider interning a NULL string as the same as an "" empty string.
     if (!str) {
         str = "";
     }
 
-    struct str_intern_tab_key lookup_key = {
+    struct mpp_strtab_key lookup_key = {
         .str = str,
         .str_len = str_len,
     };
@@ -293,7 +293,7 @@ void mpp_strtab_release(struct str_intern_tab *tab, const char *str, size_t str_
 
 // Releases a reference to a ruby string str in the intern table; see mpp_strtab_intern_rbstr for details on how
 // the conversion from VALUE to char * is done.
-void mpp_strtab_release_rbstr(struct str_intern_tab *tab, VALUE rbstr) {
+void mpp_strtab_release_rbstr(struct mpp_strtab *tab, VALUE rbstr) {
     const char *str;
     int str_len;
     mpp_strtab_rbstr_to_tmpstr(rbstr, &str, &str_len);
@@ -306,13 +306,13 @@ void mpp_strtab_release_rbstr(struct str_intern_tab *tab, VALUE rbstr) {
 // Once the index structure is created, it is safe to use this structure concurrently with the
 // table itself (i.e. so samples can continue to be collected in the profiler).
 // Note that it is NOT safe to destroy the index concurrently with table use however.
-void mpp_strtab_index(struct str_intern_tab *tab, struct str_intern_tab_index *ix) {
+void mpp_strtab_index(struct mpp_strtab *tab, struct mpp_strtab_index *ix) {
     // Accumulate a pointer to every element.
     struct mpp_strtab_table_extract_els_args table_loop_args;
     table_loop_args.should_delete = 0;
     table_loop_args.el_ary_cur_ix = 0;
     table_loop_args.el_ary_len = tab->table_count;
-    table_loop_args.el_ary = mpp_xmalloc(tab->table_count * sizeof(struct str_intern_tab_el *));
+    table_loop_args.el_ary = mpp_xmalloc(tab->table_count * sizeof(struct mpp_strtab_el *));
     rb_st_foreach(tab->table, mpp_strtab_table_extract_els, (st_data_t)&table_loop_args);
 
     // Just save the list straight on the index - the index owns that now.
@@ -326,7 +326,7 @@ void mpp_strtab_index(struct str_intern_tab *tab, struct str_intern_tab_index *i
     int64_t emptystr_index = -1;
 
     for (int64_t i = 0; i < ix->str_list_len; i++) {
-        struct str_intern_tab_el *el = ix->str_list[i];
+        struct mpp_strtab_el *el = ix->str_list[i];
         // Retain one on the refcount for each element that was saved, so they can't
         // be freed until we're done with them.
         el->refcount++;
@@ -342,7 +342,7 @@ void mpp_strtab_index(struct str_intern_tab *tab, struct str_intern_tab_index *i
 
     // Swap whatever's in 0 with wherever "" is.
     MPP_ASSERT_MSG(emptystr_index >= 0, "strtab: empty was not present while building pos_table?");
-    struct str_intern_tab_el *tmp = ix->str_list[0];
+    struct mpp_strtab_el *tmp = ix->str_list[0];
     ix->str_list[0] = ix->str_list[emptystr_index];
     ix->str_list[emptystr_index] = tmp;
     // rb_st_insert also does update!
@@ -352,7 +352,7 @@ void mpp_strtab_index(struct str_intern_tab *tab, struct str_intern_tab_index *i
 
 // Destroys a previously created index. Must not be called concurrently with any other method on
 // the stringtab or index. Does NOT free the memory ix itself.
-void mpp_strtab_index_destroy(struct str_intern_tab_index *ix) {
+void mpp_strtab_index_destroy(struct mpp_strtab_index *ix) {
     // As far as st_hash is concerned, ix->pos_table is just a mapping of numbers -> numbers; it does
     // not dereference the pointers in any way, so it's safe to just destroy the hash right off the bat
     // without carefully removing the elements first, unlike tab->table.
@@ -360,7 +360,7 @@ void mpp_strtab_index_destroy(struct str_intern_tab_index *ix) {
 
     // Decrement refcounts & maybe free them from the underlying tab.
     for (int64_t i = 0; i < ix->str_list_len; i++) {
-        struct str_intern_tab_el *el = ix->str_list[i];
+        struct mpp_strtab_el *el = ix->str_list[i];
         mpp_strtab_release_by_key(ix->tab, el->key);
     }
 
@@ -368,7 +368,7 @@ void mpp_strtab_index_destroy(struct str_intern_tab_index *ix) {
 }
 
 // Returns the index of the provided interned pointer in our list, or else -1.
-int64_t mpp_strtab_index_of(struct str_intern_tab_index *ix, const char *interned_ptr) {
+int64_t mpp_strtab_index_of(struct mpp_strtab_index *ix, const char *interned_ptr) {
     int64_t found_index;
     int r = rb_st_lookup(ix->pos_table, (st_data_t)interned_ptr, (st_data_t *)&found_index);
     if (!r) {

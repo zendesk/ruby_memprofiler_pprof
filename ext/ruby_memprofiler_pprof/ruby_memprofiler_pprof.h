@@ -16,10 +16,6 @@
 #include "pprof.upb.h"
 #pragma GCC diagnostic pop
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 // ======== COMPAT DECLARATIONS ========
 
 // For handling differences in ruby versions
@@ -78,7 +74,7 @@ void mpp_assert_fail(const char *msg, const char *assertion, const char *file, c
 #define MPP_STRTAB_UNKNOWN_LITERAL_LEN ((int)strlen(MPP_STRTAB_UNKNOWN_LITERAL))
 
 // Specialisation of the st_hash for "strings with length".
-struct str_intern_tab_key {
+struct mpp_strtab_key {
     const char *str;    // Pointer to the string; n.b. it does NOT need a null-terminator
     size_t str_len;     // Size of the string, not including any null terminator.
 };
@@ -86,7 +82,7 @@ struct str_intern_tab_key {
 // I copied this magic number out of st.c from Ruby.
 #define FNV1_32A_INIT 0x811c9dc5
 
-struct str_intern_tab_el {
+struct mpp_strtab_el {
     // Pointer to null-terminated string that has been interned
     char *str;
     // Length of str, NOT INCLUDING the null terminator
@@ -96,10 +92,10 @@ struct str_intern_tab_el {
     uint64_t refcount;
     // We cleverly keep the key _inside_ the value, so we don't need a separate bunch of malloc'd
     // memory for each _key_ as well as each _value_.
-    struct str_intern_tab_key key;
+    struct mpp_strtab_key key;
 };
 
-struct str_intern_tab {
+struct mpp_strtab {
     // 1 if the table is initialized, else zero
     int initialized;
     // The actual table which contains a mapping of (string hash) -> (str_intern_tab_el *)
@@ -113,11 +109,11 @@ struct str_intern_tab {
     const char *interned_empty_str;
 };
 
-struct str_intern_tab_index {
+struct mpp_strtab_index {
     // The table this index is a part of and came from.
-    struct str_intern_tab *tab;
+    struct mpp_strtab *tab;
     // The list & length of interned strings.
-    struct str_intern_tab_el **str_list;
+    struct mpp_strtab_el **str_list;
     int64_t str_list_len;
     // This st_hash is used to convert already-interned pointers to index into str_list.
     // It's a map of (uintptr_t) -> (int64_t)
@@ -129,36 +125,36 @@ struct str_intern_tab_index {
 
 // Initializes a new, empty string intern table. This will allocate memory that remains owned by the strtab
 // module and saves it in tab. It does _not_ allocate memory for struct intern_tab itself.
-void mpp_strtab_init(struct str_intern_tab *tab);
+void mpp_strtab_init(struct mpp_strtab *tab);
 
 // Destroys a string intern table, including freeing the underlying memory used by tab, but NOT freeing
 // any memory pointed to by tab itself.
-void mpp_strtab_destroy(struct str_intern_tab *tab);
+void mpp_strtab_destroy(struct mpp_strtab *tab);
 
 // Get the size of all memory used by the table
-size_t mpp_strtab_memsize(struct str_intern_tab *tab);
+size_t mpp_strtab_memsize(struct mpp_strtab *tab);
 
 // Intern new strings (or increment the refcount of already-interned ones)
 void mpp_strtab_intern(
-    struct str_intern_tab *tab, const char *str, int str_len,
+    struct mpp_strtab *tab, const char *str, int str_len,
     const char **interned_str_out, size_t *interned_str_len_out
 );
 void mpp_strtab_intern_rbstr(
-    struct str_intern_tab *tab, VALUE rbstr,
+    struct mpp_strtab *tab, VALUE rbstr,
     const char **interned_str_out, size_t *interned_str_len_out
 );
 
 // Decrement the refcount of elements in the intern table.
-void mpp_strtab_release(struct str_intern_tab *tab, const char *str, size_t str_len);
-void mpp_strtab_release_rbstr(struct str_intern_tab *tab, VALUE rbstr);
+void mpp_strtab_release(struct mpp_strtab *tab, const char *str, size_t str_len);
+void mpp_strtab_release_rbstr(struct mpp_strtab *tab, VALUE rbstr);
 
 // Methods for building a zero=-based list of interned pointers, for building the final string table
 // in the pprof protobuf.
-void mpp_strtab_index(struct str_intern_tab *tab, struct str_intern_tab_index *ix);
-void mpp_strtab_index_destroy(struct str_intern_tab_index *ix);
-int64_t mpp_strtab_index_of(struct str_intern_tab_index *ix, const char *interned_ptr);
+void mpp_strtab_index(struct mpp_strtab *tab, struct mpp_strtab_index *ix);
+void mpp_strtab_index_destroy(struct mpp_strtab_index *ix);
+int64_t mpp_strtab_index_of(struct mpp_strtab_index *ix, const char *interned_ptr);
 typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size_t interned_str_len, void *ctx);
-void mpp_strtab_each(struct str_intern_tab_index *ix, mpp_strtab_each_fn fn, void *ctx);
+void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *ctx);
 
 // ======== BACKTRACE DECLARATIONS ========
 struct mpp_rb_backtrace_frame {
@@ -196,8 +192,8 @@ struct mpp_rb_backtrace {
 
 // Capture a (current) backtrace, and free it.
 // Note that the free function does NOT free the struct mpp_rb_backtrace itself.
-void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct str_intern_tab *strtab);
-void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt, struct str_intern_tab *strtab);
+void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct mpp_strtab *strtab);
+void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt, struct mpp_strtab *strtab);
 size_t mpp_rb_backtrace_memsize(struct mpp_rb_backtrace *bt);
 
 // ======= MAIN DATA STRUCTURE DECLARATIONS ========
@@ -210,18 +206,6 @@ struct mpp_sample {
     struct mpp_sample *next_alloc;
 };
 
-// ======== PPROF SERIALIZATION ROUTINES ========
-
-// Forward-declare the struct, so that it's opaque to C land (in the C++ file, it will be defined as holdling
-// a reference to some protobuf classes).
-struct pprof_serialize_state;
-
-struct pprof_serialize_state *rmmp_pprof_serialize_init();
-void rmmp_pprof_serialize_add_strtab(struct pprof_serialize_state *state, struct str_intern_tab_index *strtab_ix);
-void rmmp_pprof_serialize_add_alloc_samples(struct pprof_serialize_state *state, struct mpp_sample *sample_list);
-void rmmp_pprof_serialize_to_memory(struct pprof_serialize_state *state, char **outbuf, size_t *outlen, int *abort_flag);
-void rmmp_pprof_serialize_destroy(struct pprof_serialize_state *state);
-
 // ======== PROTO SERIALIZATION ROUTINES ========
 struct mpp_pprof_serctx {
     // 1 if has been initialized, else zero
@@ -233,7 +217,7 @@ struct mpp_pprof_serctx {
     upb_arena *arena;
     // String intern index; recall that holding this object does _not_ require that we have exclusive
     // use of the underlying string intern table, so it's safe for us to use this in a separate thread.
-    struct str_intern_tab_index strindex;
+    struct mpp_strtab_index strindex;
     // Mapping of (uint64_t) -> 0 (so basically a set) for whether function & location IDs have already
     // been inserted into *profile_proto
     st_table *added_functions;
@@ -250,7 +234,7 @@ struct mpp_pprof_serctx {
 
 void mpp_pprof_serctx_init(struct mpp_pprof_serctx *ctx);
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
-int mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct str_intern_tab *strtab, char *errbuf, size_t errbuflen);
+int mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct mpp_strtab *strtab, char *errbuf, size_t errbuflen);
 int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen);
 int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen);
 
@@ -258,9 +242,5 @@ int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, siz
 extern VALUE mMemprofilerPprof;
 extern VALUE cCollector;
 void mpp_setup_collector_class();
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif
