@@ -51,7 +51,7 @@ File.open('Makefile', 'a') do |f|
   upb_objs = Dir["#{$srcdir}/*.upb.c"].map { |f| File.basename(f, ".upb.c") + ".upb.o" }
   f.puts <<~MAKEFILE
     UPB_OBJS=upb.o #{upb_objs.join ' '}
-    $(UPB_OBJS): CFLAGS += -Wno-shorten-64-to-32 -Wno-sign-compare -Wno-implicit-fallthrough -Wno-clobbered
+    $(UPB_OBJS): CFLAGS += -Wno-shorten-64-to-32 -Wno-sign-compare -Wno-implicit-fallthrough -Wno-clobbered -Wno-maybe-uninitialized
   MAKEFILE
 
   # Make Make automatically verbose if specified
