@@ -1,7 +1,11 @@
 require "mkmf"
 
-# Need -Wno-shorten-64-to-32 -Wno-sign-compare because the ubp generated protos warn on thse
-$CFLAGS << " -g -D_GNU_SOURCE -DNDEBUG -std=gnu11 -Wno-shorten-64-to-32 -Wno-sign-compare"
+append_cflags([
+  '-g', '-D_GNU_SOURCE', '-std=gnu11', '-Wall', '-Wextra',
+  '-Wno-unused-parameter', # Is generally annoying and the Ruby headers do it a bunch anyway
+  '-Wno-unknown-warning-option', # A bit tautalogical
+])
+
 # Support GC.compact on Ruby >=- 2.7
 have_func("rb_gc_mark_movable", ["ruby.h"])
 
@@ -28,9 +32,6 @@ internal_headers = proc {
   have_header("vm_core.h") and have_header("iseq.h") and have_header("version.h")
 }
 
-# Link against UPB in our source tree
-$LDFLAGS << ' upb/libupb.a'
-$CFLAGS << ' -I$(srcdir)/upb'
 
 dir_config('ruby')
 unless Debase::RubyCoreSource.create_makefile_with_core(internal_headers, "ruby_memprofiler_pprof_ext")
@@ -40,4 +41,14 @@ unless Debase::RubyCoreSource.create_makefile_with_core(internal_headers, "ruby_
   STDERR.print("        --with-ruby-include=PATH_TO_HEADERS      \n\n")
   STDERR.print("*************************************************************\n\n")
   exit(1)
+end
+
+# Append some stuff to the Makefile, to set CFLAGS slightly differently for objects that
+# we do not control (the upb stuff)
+File.open('Makefile', 'a') do |f|
+  upb_objs = Dir["#{$srcdir}/*.upb.c"].map { |f| File.basename(f, ".upb.c") + ".upb.o" }
+  f.puts <<~MAKEFILE
+    UPB_OBJS=upb.o #{upb_objs.join ' '}
+    $(UPB_OBJS): CFLAGS += -Wno-shorten-64-to-32 -Wno-sign-compare -Wno-implicit-fallthrough -Wno-clobbered
+  MAKEFILE
 end

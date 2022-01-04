@@ -153,9 +153,10 @@ static const rb_data_type_t collector_cdata_type = {
 #ifdef HAVE_RB_GC_MARK_MOVABLE
         collector_cdata_gc_compact,
 #endif
-        /* reserved */
+        { 0 }, /* reserved */
     },
     /* parent, data, [ flags ] */
+    NULL, NULL, 0
 };
 
 static struct collector_cdata *collector_cdata_get(VALUE self) {

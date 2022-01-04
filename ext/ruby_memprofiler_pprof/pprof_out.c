@@ -2,7 +2,6 @@
 #include <zlib.h>
 
 #include "ruby_memprofiler_pprof.h"
-#include "pprof.upb.h"
 
 // allocator/free function for our upb_arena. Contract is:
 // If "size" is 0 then the function acts like free(), otherwise it acts like
@@ -144,7 +143,7 @@ int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, siz
         ruby_snprintf(errbuf, errbuflen, "error initializing zlib (errno %d: %s)", r, strm.msg ?: "");
         return -1;
     }
-    strm.avail_in = protobuf_data_len;
+    strm.avail_in = (unsigned int)protobuf_data_len;
     strm.next_in = (unsigned char *)protobuf_data;
 
     const size_t out_chunk_size = 4096;

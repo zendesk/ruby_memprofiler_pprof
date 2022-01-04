@@ -5,8 +5,16 @@
 #include <stdint.h>
 
 #include <ruby.h>
+
+// UPB header files trip up a BUNCH of -Wshorten-64-to-32
+// Also ignore -Wpragmas so that if -Wshorten-64-to-32 isn't present
+// (it's a clang only thing), GCC doesn't warn about the unknown warning.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic ignored "-Wshorten-64-to-32"
 #include "upb.h"
 #include "pprof.upb.h"
+#pragma GCC diagnostic pop
 
 #ifdef __cplusplus
 extern "C" {

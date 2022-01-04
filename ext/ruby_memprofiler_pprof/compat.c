@@ -143,6 +143,7 @@ void mpp_assert_fail(
     final_msg_remaining += 2;
     FINAL_MSG_BUF_APPEND("\n\0");
 
-    write(STDERR_FILENO, final_msg_buf, final_msg_ix + 1);
+    __attribute__((unused)) size_t r =
+        write(STDERR_FILENO, final_msg_buf, final_msg_ix + 1);
     abort();
 }

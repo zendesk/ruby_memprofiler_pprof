@@ -50,6 +50,7 @@ check_method_entry(VALUE obj, int can_be_svar)
             if (can_be_svar) {
                 return check_method_entry(((struct vm_svar *)obj)->cref_or_me, 0);
             }
+            // falls through
         default:
 #if VM_CHECK_MODE > 0
             rb_bug("check_method_entry: svar should not be there:");
@@ -171,7 +172,7 @@ void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct str_intern_tab *s
 
 void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt, struct str_intern_tab *strtab) {
     // Decrement the refcount on each interned string.
-    for (size_t i = 0; i < bt->frames_count; i++) {
+    for (int64_t i = 0; i < bt->frames_count; i++) {
         struct mpp_rb_backtrace_frame *frame = &bt->frames[i];
         mpp_strtab_release(strtab, frame->filename, frame->filename_len);
         mpp_strtab_release(strtab, frame->function_name, frame->function_name_len);
