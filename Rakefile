@@ -12,7 +12,14 @@ Rake::ExtensionTask.new do |ext|
   ext.lib_dir = "lib/ruby_memprofiler_pprof"
   ext.gem_spec = gemspec
 end
-Rake::TestTask.new(:test) {}
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = FileList["test/**/test_*.rb"]
+  t.verbose = true
+  t.options = "--verbose"
+  t.warning = false
+end
 
 task default: [:compile]
 
@@ -65,7 +72,7 @@ task :proto_compile do
 
   protoc_gen_upb = "#{upb_dir}/bazel-bin/upbc/protoc-gen-upb"
   sh 'protoc', '--proto_path=proto', "--plugin=#{protoc_gen_upb}",
-    "--upb_out=ext/ruby_memprofiler_pprof", "--ruby_out=lib/ruby_memprofiler_pprof/pb",
+    "--upb_out=ext/ruby_memprofiler_pprof", "--ruby_out=test",
     *Dir["proto/*.proto"]
 
   # We need to hack at the generated protobufs because they #include "upb/stuff.h", but all
