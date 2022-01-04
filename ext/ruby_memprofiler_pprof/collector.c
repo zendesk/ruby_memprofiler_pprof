@@ -46,8 +46,8 @@ static int collector_cdata_gc_decrement_live_object_refcounts(st_data_t key, st_
 
 static void collector_cdata_gc_free_live_object_table(struct collector_cdata *cd) {
     if (cd->live_objects) {
-        rb_st_foreach(cd->live_objects, collector_cdata_gc_decrement_live_object_refcounts, (st_data_t)cd);
-        rb_st_free_table(cd->live_objects);
+        st_foreach(cd->live_objects, collector_cdata_gc_decrement_live_object_refcounts, (st_data_t)cd);
+        st_free_table(cd->live_objects);
     }
     cd->live_objects = NULL;
 }
@@ -119,8 +119,8 @@ static size_t collector_cdata_memsize(const void *ptr) {
     struct collector_cdata *cd = (struct collector_cdata *)ptr;
     size_t sz = sizeof(*cd);
     if (cd->live_objects) {
-        rb_st_foreach(cd->live_objects, collector_cdata_gc_memsize_live_objects, (st_data_t)&sz);
-        sz += rb_st_memsize(cd->live_objects);
+        st_foreach(cd->live_objects, collector_cdata_gc_memsize_live_objects, (st_data_t)&sz);
+        sz += st_memsize(cd->live_objects);
     }
     if (cd->string_tab.initialized) {
         sz += mpp_strtab_memsize(&cd->string_tab);
@@ -207,7 +207,7 @@ static VALUE collector_tphook_newobj_impl(VALUE args_as_uintptr) {
     sample->next_alloc = cd->samples;
     cd->samples = sample;
     // And into the heap profiling list.
-    rb_st_insert(cd->live_objects, newobj, (st_data_t)sample);
+    st_insert(cd->live_objects, newobj, (st_data_t)sample);
 
     return Qnil;
 }
@@ -265,7 +265,7 @@ static void collector_tphook_freeobj(VALUE tpval, void *data) {
     VALUE freed_obj = rb_tracearg_object(tparg);
 
     struct mpp_sample *sample;
-    if (rb_st_delete(cd->live_objects, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
+    if (st_delete(cd->live_objects, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
         // We deleted it out of live objects; decrement its refcount.
         internal_sample_decrement_refcount(cd, sample);
     }

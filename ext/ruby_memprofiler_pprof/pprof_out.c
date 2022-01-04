@@ -20,8 +20,8 @@ void mpp_pprof_serctx_init(struct mpp_pprof_serctx *ctx) {
     ctx->allocator.func = mpp_pprof_upb_arena_malloc;
     ctx->arena = upb_arena_init(NULL, 0, &ctx->allocator);
     ctx->profile_proto = perftools_profiles_Profile_new(ctx->arena);
-    ctx->added_functions = rb_st_init_numtable();
-    ctx->added_locations = rb_st_init_numtable();
+    ctx->added_functions = st_init_numtable();
+    ctx->added_locations = st_init_numtable();
     memset(&ctx->strindex, 0, sizeof(ctx->strindex));
     ctx->initialized = 1;
 }
@@ -34,8 +34,8 @@ void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
         return;
     }
     upb_arena_free(ctx->arena);
-    rb_st_free_table(ctx->added_functions);
-    rb_st_free_table(ctx->added_locations);
+    st_free_table(ctx->added_functions);
+    st_free_table(ctx->added_locations);
     mpp_strtab_index_destroy(&ctx->strindex);
 }
 
@@ -86,7 +86,7 @@ static int mpp_pprof_serctx_add_function(
     struct mpp_pprof_serctx *ctx, struct mpp_rb_backtrace_frame *frame, char *errbuf, size_t errbuflen
 ) {
     // Have we already added this function before?
-    if (rb_st_lookup(ctx->added_functions, frame->function_id, NULL)) {
+    if (st_lookup(ctx->added_functions, frame->function_id, NULL)) {
         return 0;
     }
 
@@ -110,7 +110,7 @@ static int mpp_pprof_serctx_add_function(
 
 #undef FN_SET_STRINTERN_FIELD
 
-    rb_st_insert(ctx->added_functions, frame->function_id, 0);
+    st_insert(ctx->added_functions, frame->function_id, 0);
     return 0;
 }
 
@@ -118,7 +118,7 @@ static int mpp_pprof_serctx_add_location(
     struct mpp_pprof_serctx *ctx, struct mpp_rb_backtrace_frame *frame, char *errbuf, size_t errbuflen
 ) {
     // Have we already added this location before?
-    if (rb_st_lookup(ctx->added_locations, frame->location_id, NULL)) {
+    if (st_lookup(ctx->added_locations, frame->location_id, NULL)) {
         return 0;
     }
 
@@ -129,7 +129,7 @@ static int mpp_pprof_serctx_add_location(
     perftools_profiles_Line_set_function_id(line_proto, frame->function_id);
     perftools_profiles_Line_set_line(line_proto, frame->line_number);
 
-    rb_st_insert(ctx->added_locations, frame->location_id, 0);
+    st_insert(ctx->added_locations, frame->location_id, 0);
 
     return 0;
 }
