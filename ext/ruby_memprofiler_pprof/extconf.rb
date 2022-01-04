@@ -6,6 +6,7 @@ append_cflags([
   '-Wno-unused-parameter', # Is generally annoying and the Ruby headers do it a bunch anyway
   '-Wno-unknown-warning-option', # A bit tautalogical
   '-Wno-declaration-after-statement', # Somehow, this is in CFLAGS somewhere? Who needs it?
+  '-Wno-suggest-attribute=noreturn', # I will survive without this too.
 ])
 
 if ENV['WERROR'] == 'true'
