@@ -5,6 +5,7 @@ append_cflags([
   '-fvisibility=hidden', # Make sure our upb symbols don't clobber anybody elses
   '-Wno-unused-parameter', # Is generally annoying and the Ruby headers do it a bunch anyway
   '-Wno-unknown-warning-option', # A bit tautalogical
+  '-Wno-declaration-after-statement', # Somehow, this is in CFLAGS somewhere? Who needs it?
 ])
 
 if ENV['WERROR'] == 'true'
