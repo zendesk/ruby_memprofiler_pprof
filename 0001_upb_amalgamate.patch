@@ -1,0 +1,56 @@
+From 4791747e32e96b301ba6ef737f21b4c4fd629bbc Mon Sep 17 00:00:00 2001
+From: KJ Tsanaktsidis <ktsanaktsidis@zendesk.com>
+Date: Tue, 4 Jan 2022 16:46:27 +1100
+Subject: [PATCH] Fix amalgamate script to include third_party stuff
+
+The PR https://github.com/protocolbuffers/upb/pull/429 added the
+utf8_range library in the third_party directory for some utf8
+verification routines. However, the amalgamate script does not look
+there for things to squash into the amalgamation header files.
+
+Fix this by:
+    * Adding utf8_range as a lib dep for the amalgamate target in Bazel,
+      so that build_defs.bzl will include the .c file in the
+      amalgamation
+    * Including third_party as a valid header path to squash out in the
+      amalgamate script itself
+---
+ BUILD               | 1 +
+ bazel/amalgamate.py | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/BUILD b/BUILD
+index 2625740..7135037 100644
+--- a/BUILD
++++ b/BUILD
+@@ -270,6 +270,7 @@ upb_amalgamation(
+         ":descriptor_upb_proto",
+         ":reflection",
+         ":port",
++        "//third_party/utf8_range",
+     ],
+ )
+
+diff --git a/bazel/amalgamate.py b/bazel/amalgamate.py
+index 103b11c..54ca7e7 100755
+--- a/bazel/amalgamate.py
++++ b/bazel/amalgamate.py
+@@ -30,6 +30,7 @@ import re
+ import os
+
+ INCLUDE_RE = re.compile('^#include "([^"]*)"$')
++VALID_HDR_PREFIXES = ["upb", "google", "third_party"]
+
+ def parse_include(line):
+   match = INCLUDE_RE.match(line)
+@@ -86,7 +87,7 @@ class Amalgamator:
+     include = parse_include(line)
+     if not include:
+       return False
+-    if not (include.startswith("upb") or include.startswith("google")):
++    if not any([include.startswith(prefix) for prefix in VALID_HDR_PREFIXES]):
+       return False
+     if include.endswith("hpp"):
+       # Skip, we don't support the amalgamation from C++.
+--
+2.33.1

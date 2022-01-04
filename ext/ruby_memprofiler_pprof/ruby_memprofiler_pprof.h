@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include <ruby.h>
-#include "upb/upb/upb.h"
+#include "upb.h"
 #include "pprof.upb.h"
 
 #ifdef __cplusplus
