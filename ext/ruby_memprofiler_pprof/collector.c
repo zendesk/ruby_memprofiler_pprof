@@ -10,8 +10,7 @@
 
 #include "ruby_memprofiler_pprof.h"
 
-static VALUE mMemprofilerPprof;
-static VALUE cCollector;
+VALUE cCollector;
 
 struct collector_cdata {
     VALUE newobj_trace;                 // Ruby Tracepoint object for newobj hook
@@ -420,7 +419,7 @@ out:
     RB_GC_GUARD(self);
 }
 
-void setup_collector_class() {
+void mpp_setup_collector_class() {
     cCollector = rb_define_class_under(mMemprofilerPprof, "Collector", rb_cObject);
     rb_define_alloc_func(cCollector, collector_alloc);
 
@@ -430,11 +429,4 @@ void setup_collector_class() {
     rb_define_private_method(cCollector, "set_sample_rate_cimpl", collector_set_sample_rate_cimpl, 1);
     rb_define_private_method(cCollector, "rotate_profile_cimpl", collector_rotate_profile_cimpl, 0);
     rb_define_private_method(cCollector, "get_running_cimpl", collector_get_running_cimpl, 0);
-}
-
-void Init_ruby_memprofiler_pprof_ext() {
-    mpp_rand_init();
-    rb_ext_ractor_safe(true);
-    mMemprofilerPprof = rb_define_module("MemprofilerPprof");
-    setup_collector_class();
 }

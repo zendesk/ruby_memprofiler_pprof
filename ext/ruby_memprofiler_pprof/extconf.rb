@@ -2,6 +2,7 @@ require "mkmf"
 
 append_cflags([
   '-g', '-D_GNU_SOURCE', '-std=gnu11', '-Wall', '-Wextra',
+  '-fvisibility=hidden', # Make sure our upb symbols don't clobber anybody elses
   '-Wno-unused-parameter', # Is generally annoying and the Ruby headers do it a bunch anyway
   '-Wno-unknown-warning-option', # A bit tautalogical
 ])

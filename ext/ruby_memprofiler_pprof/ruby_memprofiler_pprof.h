@@ -253,6 +253,12 @@ void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
 int mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct str_intern_tab *strtab, char *errbuf, size_t errbuflen);
 int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen);
 int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen);
+
+// ======== COLLECTOR RUBY CLASS ========
+extern VALUE mMemprofilerPprof;
+extern VALUE cCollector;
+void mpp_setup_collector_class();
+
 #ifdef __cplusplus
 }
 #endif
