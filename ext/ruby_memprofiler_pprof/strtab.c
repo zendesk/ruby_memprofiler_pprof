@@ -51,9 +51,10 @@ static int mpp_strtab_table_extract_els(st_data_t key, st_data_t value, st_data_
     struct str_intern_tab_el *el = (struct str_intern_tab_el *)value;
     struct mpp_strtab_table_extract_els_args *args = (struct mpp_strtab_table_extract_els_args *)arg;
 
-    if (args->el_ary_cur_ix >= args->el_ary_len) {
-        rb_bug("ruby_memprofiler_pprof_ext: strtab: array passed in to mpp_strtab_table_extract_els not big enough?");
-    }
+    MPP_ASSERT_MSG(
+        args->el_ary_cur_ix < args->el_ary_len,
+        "strtab: array passed in to mpp_strtab_table_extract_els not big enough?"
+    );
 
     args->el_ary[args->el_ary_cur_ix] = el;
     args->el_ary_cur_ix++;
@@ -68,10 +69,7 @@ struct mpp_strtab_table_decrement_el_refcount_args {
 // Used in rb_st_update to decrement the refcount of a table entry; if the refcount drops to zero, the
 // struct str_intern_tab_el is freed and the entry removed from the table.
 static int mpp_strtab_table_decrement_el_refcount(st_data_t *key, st_data_t *value, st_data_t arg, int existing) {
-    if (!existing || !value) {
-        // We didn't even have this interned?
-        rb_bug("ruby_memprofiler_pprof_ext: strtab: attempted to decrement refcount on non-present element");
-    }
+    MPP_ASSERT_MSG(existing && value, "strtab: attempted to decrement refcount on non-present element");
     struct str_intern_tab_el *el = (struct str_intern_tab_el *)*value;
 
     // We need to store the value we are operating on back in the *args array, so our caller can free the element
@@ -79,9 +77,7 @@ static int mpp_strtab_table_decrement_el_refcount(st_data_t *key, st_data_t *val
     struct mpp_strtab_table_decrement_el_refcount_args *args = (struct mpp_strtab_table_decrement_el_refcount_args *)arg;
     args->el = el;
 
-    if (el->refcount == 0) {
-        rb_bug("ruby_memprofiler_pprof_ext: strtab: attempted to decrement refcount on %s below zero", el->str);
-    }
+    MPP_ASSERT_MSG(el->refcount > 0, "strtab: attempted to decrement refcount below zero");
     el->refcount--;
 
     // Remvoe it from the table if it was the last reference.
@@ -177,9 +173,8 @@ static void mpp_strtab_intern_impl(
     interned_value->refcount = 1;
 
     int r = rb_st_insert(tab->table, (st_data_t)&interned_value->key, (st_data_t)interned_value);
-    if (r != 0) {
-        rb_bug("ruby_memprofiler_pprof_ext: strtab: attempted to overwrite intern entry for string %s", str);
-    }
+    MPP_ASSERT_MSG(r == 0, "strtab: attempted to overwrite intern entry");
+
     tab->table_count++;
     tab->table_entry_size += sizeof(*interned_value) + interned_value->str_len + 1;
     *interned_str_out = interned_value->str;
@@ -274,9 +269,7 @@ static void mpp_strtab_release_by_key(struct str_intern_tab *tab, struct str_int
     // If the found element had its refcount dropped to zero, free it; note that this _MUST_ happen _AFTER_
     // removing it from the table, because we use the str pointer on the element as the key in the table and
     // the comparison function will read freed memory if we free it before removing it.
-    if (!cb_args.el) {
-        rb_bug("ruby_memprofiler_pprof_ext: strtab: did not write the updated element to cb_args.el?");
-    }
+    MPP_ASSERT_MSG(cb_args.el, "strtab: did not write the updated element to cb_args.el?");
     if (cb_args.el->refcount == 0) {
         tab->table_count--;
         tab->table_entry_size -= sizeof(*cb_args.el) + cb_args.el->str_len + 1;
@@ -340,9 +333,7 @@ void mpp_strtab_index(struct str_intern_tab *tab, struct str_intern_tab_index *i
 
         // Insert it into the interned ptr table.
         int r = rb_st_insert(ix->pos_table, (st_data_t)el->str, i);
-        if (r) {
-            rb_bug("ruby_memprofiler_pprof_ext: strtab: duplicate entry while building pos_table?");
-        }
+        MPP_ASSERT_MSG(r == 0, "strtab: duplicate entry while building pos_table?");
         if (el->str == tab->interned_empty_str) {
             emptystr_index = i;
         }
@@ -350,9 +341,7 @@ void mpp_strtab_index(struct str_intern_tab *tab, struct str_intern_tab_index *i
 
 
     // Swap whatever's in 0 with wherever "" is.
-    if (emptystr_index == -1) {
-        rb_bug("ruby_memprofiler_pprof_ext: strtab: empty was not present while building pos_table?");
-    }
+    MPP_ASSERT_MSG(emptystr_index >= 0, "strtab: empty was not present while building pos_table?");
     struct str_intern_tab_el *tmp = ix->str_list[0];
     ix->str_list[0] = ix->str_list[emptystr_index];
     ix->str_list[emptystr_index] = tmp;

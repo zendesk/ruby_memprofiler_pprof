@@ -59,7 +59,7 @@ void *mpp_xcalloc(size_t sz) {
 void *mpp_xmalloc(size_t sz) {
     void *mem = malloc(sz);
     if (!mem) {
-        rb_sys_fail("failed to allocate memory in ruby_memprofiler_pprof gem");
+        MPP_ASSERT_FAIL("failed to allocate memory in ruby_memprofiler_pprof gem");
     }
     return mem;
 }
@@ -71,40 +71,40 @@ void mpp_free(void *mem) {
 void *mpp_realloc(void *mem, size_t newsz) {
     void *newmem = realloc(mem, newsz);
     if (!newmem) {
-        rb_sys_fail("failed to allocate memory in ruby_memprofiler_pprof gem");
+        MPP_ASSERT_FAIL("failed to allocate memory in ruby_memprofiler_pprof gem");
     }
     return newmem;
 }
 
 void mpp_pthread_mutex_lock(pthread_mutex_t *m) {
     if (pthread_mutex_lock(m) != 0) {
-        rb_sys_fail("failed to lock mutex in ruby_memprofiler_pprof gem");
+        MPP_ASSERT_FAIL("failed to lock mutex in ruby_memprofiler_pprof gem");
     }
 }
 
 void mpp_pthread_mutex_unlock(pthread_mutex_t *m) {
     if (pthread_mutex_unlock(m) != 0) {
-        rb_sys_fail("failed to unlock mutex in ruby_memprofiler_pprof gem");
+        MPP_ASSERT_FAIL("failed to unlock mutex in ruby_memprofiler_pprof gem");
     }
 }
 
 int mpp_pthread_mutex_trylock(pthread_mutex_t *m) {
     int r = pthread_mutex_trylock(m);
     if (r != 0 && r != EBUSY) {
-        rb_sys_fail("failed to trylock mutex in ruby_memprofiler_pprof gem");
+        MPP_ASSERT_FAIL("failed to trylock mutex in ruby_memprofiler_pprof gem");
     }
     return r;
 }
 
 void mpp_pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *attr) {
     if (pthread_mutex_init(m, attr) != 0) {
-        rb_sys_fail("failed to init mutex in ruby_memprofiler_pprof gem");
+        MPP_ASSERT_FAIL("failed to init mutex in ruby_memprofiler_pprof gem");
     }
 }
 
 void mpp_pthread_mutex_destroy(pthread_mutex_t *m) {
     if (pthread_mutex_destroy(m) != 0) {
-        rb_sys_fail("failed to destroy mutex in ruby_memprofiler_pprof gem");
+        MPP_ASSERT_FAIL("failed to destroy mutex in ruby_memprofiler_pprof gem");
     }
 }
 

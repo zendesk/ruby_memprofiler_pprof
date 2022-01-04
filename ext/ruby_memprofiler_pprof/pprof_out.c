@@ -43,9 +43,13 @@ void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
 // This method will actually take a reference to all relevant strings currently in strtab via
 // a call to mpp_strtab_index; thus, after this method returns, it is safe for another thread to
 // continue using the stringtab because we have what we need in our index.
-void mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct str_intern_tab *strtab) {
+int mpp_pprof_serctx_set_strtab(
+    struct mpp_pprof_serctx *ctx, struct str_intern_tab *strtab, char *errbuf, size_t errbuflen
+) {
     // Intern some strings we'll need to produce our output
-    mpp_strtab_intern(strtab, "allocations", MPP_STRTAB_USE_STRLEN, &ctx->internstr_allocations, NULL);
+    mpp_strtab_intern(
+        strtab, "allocations", MPP_STRTAB_USE_STRLEN, &ctx->internstr_allocations, NULL
+    );
     mpp_strtab_intern(strtab, "count", MPP_STRTAB_USE_STRLEN, &ctx->internstr_count, NULL);
 
     mpp_strtab_index(strtab, &ctx->strindex);
@@ -61,30 +65,61 @@ void mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct str_intern
 
     perftools_profiles_ValueType *vt =
         perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
-    perftools_profiles_ValueType_set_type(vt, mpp_strtab_index_of(&ctx->strindex, ctx->internstr_allocations));
-    perftools_profiles_ValueType_set_unit(vt, mpp_strtab_index_of(&ctx->strindex, ctx->internstr_count));
+#define VT_SET_STRINTERN_FIELD(field, str)                                                                  \
+    do {                                                                                                    \
+        int64_t interned = mpp_strtab_index_of(&ctx->strindex, (str));                                      \
+        if (interned == -1) {                                                                               \
+            ruby_snprintf(errbuf, errbuflen, "non-interned string %s passed for ValueType.#field", (str));  \
+            return -1;                                                                                      \
+        }                                                                                                   \
+        perftools_profiles_ValueType_set_##field(vt, interned);                                             \
+    } while (0)
+
+    VT_SET_STRINTERN_FIELD(type, ctx->internstr_allocations);
+    VT_SET_STRINTERN_FIELD(unit, ctx->internstr_count);
+    return 0;
+
+#undef VT_SET_STRINTERN_FIELD
 }
 
-static void mpp_pprof_serctx_add_function(struct mpp_pprof_serctx *ctx, struct mpp_rb_backtrace_frame *frame) {
+static int mpp_pprof_serctx_add_function(
+    struct mpp_pprof_serctx *ctx, struct mpp_rb_backtrace_frame *frame, char *errbuf, size_t errbuflen
+) {
     // Have we already added this function before?
     if (rb_st_lookup(ctx->added_functions, frame->function_id, NULL)) {
-        return;
+        return 0;
     }
 
     // No, add it.
     perftools_profiles_Function *fn_proto = perftools_profiles_Profile_add_function(ctx->profile_proto, ctx->arena);
     perftools_profiles_Function_set_id(fn_proto, frame->function_id);
-    perftools_profiles_Function_set_name(fn_proto, mpp_strtab_index_of(&ctx->strindex, frame->function_name));
-    perftools_profiles_Function_set_system_name(fn_proto, mpp_strtab_index_of(&ctx->strindex, frame->function_name));
-    perftools_profiles_Function_set_filename(fn_proto, mpp_strtab_index_of(&ctx->strindex, frame->filename));
+
+#define FN_SET_STRINTERN_FIELD(field, str)                                                                  \
+    do {                                                                                                    \
+        int64_t interned = mpp_strtab_index_of(&ctx->strindex, (str));                                      \
+        if (interned == -1) {                                                                               \
+            ruby_snprintf(errbuf, errbuflen, "non-interned string %s passed for Function.#field", (str));   \
+            return -1;                                                                                      \
+        }                                                                                                   \
+        perftools_profiles_Function_set_##field(fn_proto, interned);                                        \
+    } while (0)
+
+    FN_SET_STRINTERN_FIELD(name, frame->function_name);
+    FN_SET_STRINTERN_FIELD(system_name, frame->function_name);
+    FN_SET_STRINTERN_FIELD(filename, frame->filename);
+
+#undef FN_SET_STRINTERN_FIELD
 
     rb_st_insert(ctx->added_functions, frame->function_id, 0);
+    return 0;
 }
 
-static void mpp_pprof_serctx_add_location(struct mpp_pprof_serctx *ctx, struct mpp_rb_backtrace_frame *frame) {
+static int mpp_pprof_serctx_add_location(
+    struct mpp_pprof_serctx *ctx, struct mpp_rb_backtrace_frame *frame, char *errbuf, size_t errbuflen
+) {
     // Have we already added this location before?
     if (rb_st_lookup(ctx->added_locations, frame->location_id, NULL)) {
-        return;
+        return 0;
     }
 
     // No, add it.
@@ -95,9 +130,14 @@ static void mpp_pprof_serctx_add_location(struct mpp_pprof_serctx *ctx, struct m
     perftools_profiles_Line_set_line(line_proto, frame->line_number);
 
     rb_st_insert(ctx->added_locations, frame->location_id, 0);
+
+    return 0;
 }
 
-void mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample) {
+int mpp_pprof_serctx_add_sample(
+    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen
+) {
+    int r;
     perftools_profiles_Sample *sample_proto = perftools_profiles_Profile_add_sample(ctx->profile_proto, ctx->arena);
     uint64_t *location_ids =
         perftools_profiles_Sample_resize_location_id(sample_proto, sample->bt.frames_count, ctx->arena);
@@ -109,19 +149,24 @@ void mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample
         location_ids[i] = frame->location_id;
 
         // Adds the function & location protos to the main proto by ID, if they're not there already.
-        mpp_pprof_serctx_add_function(ctx, frame);
-        mpp_pprof_serctx_add_location(ctx, frame);
+        r = mpp_pprof_serctx_add_function(ctx, frame, errbuf, errbuflen);
+        if (r == -1) return r;
+        mpp_pprof_serctx_add_location(ctx, frame, errbuf, errbuflen);
+        if (r == -1) return r;
     }
 
     // TODO: values & labels
     perftools_profiles_Sample_add_value(sample_proto, 1, ctx->arena);
+    return 0;
 }
 
 // Serializes the contained protobuf, and gzips the result. Writes a pointer to the memory in *buf_out,
 // and its length to buflen_out. The returned pointer is freed when mpp_pprof_serctx_destroy() is called,
 // and should NOT be individually freed by the caller in any way (and nor is it valid after the call
 // to destroy()).
-int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen) {
+int mpp_pprof_serctx_serialize(
+    struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen
+) {
     // It looks like some codepaths might leak the protobuf_data pointer, but that's OK - it's in
     // the ctx->arena so it'll get freed when ctx does.
     size_t protobuf_data_len;
@@ -138,7 +183,10 @@ int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, siz
     strm.msg = NULL;
     int windowBits = 15;
     int GZIP_ENCODING = 16;
-    r = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits | GZIP_ENCODING, 8, Z_DEFAULT_STRATEGY);
+    r = deflateInit2(
+        &strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+        windowBits | GZIP_ENCODING, 8, Z_DEFAULT_STRATEGY
+    );
     if (r != Z_OK) {
         ruby_snprintf(errbuf, errbuflen, "error initializing zlib (errno %d: %s)", r, strm.msg ?: "");
         return -1;

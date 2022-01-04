@@ -47,7 +47,7 @@ void mpp_rand_init();
 
 
 // These declarations just wrap some things from the standard library that should "always succeed", but call
-// rb_sys_fail() if they fail to abort the program.
+// our assertion macro if they fail to abort the program.
 void *mpp_xmalloc(size_t sz);
 void *mpp_realloc(void *mem, size_t newsz);
 void mpp_free(void *mem);
@@ -64,6 +64,7 @@ void mpp_pthread_mutex_destroy(pthread_mutex_t *m);
 // so users know who is at fault).
 __attribute__ ((noreturn))
 void mpp_assert_fail(const char *msg, const char *assertion, const char *file, const char *line, const char *fn);
+#define MPP_ASSERT_FAIL(expr) MPP_ASSERT_MSG(expr, 0)
 #define MPP_ASSERT_MSG(expr, msg)                                               \
     do {                                                                        \
         if ((expr) == 0) {                                                      \
@@ -249,8 +250,8 @@ struct mpp_pprof_serctx {
 
 void mpp_pprof_serctx_init(struct mpp_pprof_serctx *ctx);
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
-void mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct str_intern_tab *strtab);
-void mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample);
+int mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct str_intern_tab *strtab, char *errbuf, size_t errbuflen);
+int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen);
 int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen);
 #ifdef __cplusplus
 }
