@@ -18,10 +18,6 @@ if !has_arc4random && !(has_mrand48_r && has_getentropy)
   abort "Need either arc4random (BSD) or mrand48_r/getentropy (GNU)"
 end
 
-# Need protobuf
-has_pb_lib = have_library("protobuf")
-raise "Protobuf headers & library are required!" unless has_pb_lib
-
 # Need zlib
 has_zlib_headers = have_header("zlib.h")
 has_zlib_lib = have_library("z")

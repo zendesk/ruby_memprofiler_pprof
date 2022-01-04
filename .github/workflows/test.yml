@@ -8,10 +8,10 @@ jobs:
       fail-fast: false
       matrix:
         ruby:
-          - 2.6
-          - 2.7
-          - 3.0
-          - 3.1
+          - '2.6'
+          - '2.7'
+          - '3.0'
+          - '3.1'
     steps:
       - uses: zendesk/checkout@v2
       - uses: zendesk/setup-ruby@v1
