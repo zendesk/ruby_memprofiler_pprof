@@ -20,7 +20,7 @@
 
 // For handling differences in ruby versions
 #ifndef HAVE_RB_GC_MARK_MOVABLE
-#define rb_gc_mark_moveable(v) rb_gc_mark(v)
+#define rb_gc_mark_movable(v) rb_gc_mark(v)
 #endif
 
 #ifndef RB_PASS_KEYWORDS
