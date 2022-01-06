@@ -21,8 +21,6 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new() {
     ctx->allocator.func = mpp_pprof_upb_arena_malloc;
     ctx->arena = upb_arena_init(NULL, 0, &ctx->allocator);
     ctx->profile_proto = perftools_profiles_Profile_new(ctx->arena);
-    ctx->added_functions = st_init_numtable();
-    ctx->added_locations = st_init_numtable();
     ctx->strindex = NULL;
     return ctx;
 }
@@ -32,30 +30,108 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new() {
 // freed and must not be dereferenced after this.
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
     upb_arena_free(ctx->arena);
-    st_free_table(ctx->added_functions);
-    st_free_table(ctx->added_locations);
     if (ctx->strindex) {
         mpp_strtab_index_destroy(ctx->strindex);
     }
     mpp_free(ctx);
 }
 
-// This method is used to set the stringtab interning table used on the strings in the samples.
-// This method will actually take a reference to all relevant strings currently in strtab via
+
+struct mpp_pprof_serctx_add_location_ctx {
+    struct mpp_pprof_serctx *ctx;
+    struct perftools_profiles_Location **location_proto_arr;
+    int64_t i;
+    int is_error;
+    char *errbuf;
+    size_t errbuflen;
+};
+
+static int mpp_pprof_serctx_add_location(
+    struct mpp_rb_loctab *loctab, struct mpp_rb_loctab_location *location, void *ctx
+) {
+    struct mpp_pprof_serctx_add_location_ctx *thunkctx = ctx;
+    MPP_ASSERT_MSG(thunkctx->i < thunkctx->ctx->loctab->location_count, "location_count was too small?");
+
+//    struct perftools_profiles_Location *loc_proto = perftools_profiles_Location_new(thunkctx->ctx->arena);
+    struct perftools_profiles_Location *loc_proto = perftools_profiles_Profile_add_location(thunkctx->ctx->profile_proto, thunkctx->ctx->arena);
+//    thunkctx->location_proto_arr[thunkctx->i] = loc_proto;
+    thunkctx->i++;
+
+
+    perftools_profiles_Location_set_id(loc_proto, location->id);
+    perftools_profiles_Line *line_proto = perftools_profiles_Location_add_line(loc_proto, thunkctx->ctx->arena);
+    perftools_profiles_Line_set_function_id(line_proto, location->function->id);
+    perftools_profiles_Line_set_line(line_proto, location->line_number);
+
+    return ST_CONTINUE;
+}
+
+struct mpp_pprof_serctx_add_function_ctx {
+    struct mpp_pprof_serctx *ctx;
+    struct perftools_profiles_Function **fn_proto_arr;
+    int64_t i;
+    int is_error;
+    char *errbuf;
+    size_t errbuflen;
+};
+
+static int mpp_pprof_serctx_add_function(
+    struct mpp_rb_loctab *loctab, struct mpp_rb_loctab_function *function, void *ctx
+) {
+    struct mpp_pprof_serctx_add_function_ctx *thunkctx = ctx;
+    MPP_ASSERT_MSG(thunkctx->i < thunkctx->ctx->loctab->function_count, "function_count was too small?");
+
+//    struct perftools_profiles_Function *fn_proto = perftools_profiles_Function_new(thunkctx->ctx->arena);
+    struct perftools_profiles_Function *fn_proto = perftools_profiles_Profile_add_function(thunkctx->ctx->profile_proto, thunkctx->ctx->arena);
+//    thunkctx->fn_proto_arr[thunkctx->i] = fn_proto;
+    thunkctx->i++;
+
+    perftools_profiles_Function_set_id(fn_proto, function->id);
+
+#define FN_SET_STRINTERN_FIELD(field, str)                                                                  \
+    do {                                                                                                    \
+        int64_t interned = mpp_strtab_index_of(thunkctx->ctx->strindex, (str));                             \
+        if (interned == -1) {                                                                               \
+            ruby_snprintf(                                                                                  \
+                thunkctx->errbuf, thunkctx->errbuflen,                                                      \
+                "non-interned string %s passed for Function.#field", (str)                                  \
+            );                                                                                              \
+            return -1;                                                                                      \
+        }                                                                                                   \
+        perftools_profiles_Function_set_##field(fn_proto, interned);                                        \
+    } while (0)
+
+    FN_SET_STRINTERN_FIELD(name, function->function_name);
+    FN_SET_STRINTERN_FIELD(system_name, function->function_name);
+    FN_SET_STRINTERN_FIELD(filename, function->file_name);
+
+#undef FN_SET_STRINTERN_FIELD
+
+
+    return ST_CONTINUE;
+}
+
+
+// This method is used to set the location table used in backtrace samples to be added
+//
+// This method will actually take a reference to all relevant strings currently in loctab->strtab via
 // a call to mpp_strtab_index; thus, after this method returns, it is safe for another thread to
 // continue using the stringtab because we have what we need in our index.
-int mpp_pprof_serctx_set_strtab(
-    struct mpp_pprof_serctx *ctx, struct mpp_strtab *strtab, char *errbuf, size_t errbuflen
+int mpp_pprof_serctx_set_loctab(
+    struct mpp_pprof_serctx *ctx, struct mpp_rb_loctab *loctab, char *errbuf, size_t errbuflen
 ) {
+    ctx->loctab = loctab;
+
     // Intern some strings we'll need to produce our output
     mpp_strtab_intern(
-        strtab, "allocations", MPP_STRTAB_USE_STRLEN, &ctx->internstr_allocations, NULL
+        loctab->strtab, "allocations", MPP_STRTAB_USE_STRLEN, &ctx->internstr_allocations, NULL
     );
-    mpp_strtab_intern(strtab, "count", MPP_STRTAB_USE_STRLEN, &ctx->internstr_count, NULL);
+    mpp_strtab_intern(loctab->strtab, "count", MPP_STRTAB_USE_STRLEN, &ctx->internstr_count, NULL);
 
-    ctx->strindex = mpp_strtab_index(strtab);
+    ctx->strindex = mpp_strtab_index(loctab->strtab);
     MPP_ASSERT_MSG(ctx->strindex, "mpp_strtab_index returned 0");
 
+    // Set up the string table in the protobuf
     upb_strview *stringtab_list_proto =
         perftools_profiles_Profile_resize_string_table(ctx->profile_proto, ctx->strindex->str_list_len, ctx->arena);
     for (int64_t i = 0; i < ctx->strindex->str_list_len; i++) {
@@ -65,6 +141,7 @@ int mpp_pprof_serctx_set_strtab(
         stringtab_proto->size = intern_tab_el->str_len;
     }
 
+    // Set up the sample types etc.
     perftools_profiles_ValueType *vt =
         perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
 #define VT_SET_STRINTERN_FIELD(field, str)                                                                  \
@@ -79,59 +156,37 @@ int mpp_pprof_serctx_set_strtab(
 
     VT_SET_STRINTERN_FIELD(type, ctx->internstr_allocations);
     VT_SET_STRINTERN_FIELD(unit, ctx->internstr_count);
-    return 0;
-
 #undef VT_SET_STRINTERN_FIELD
-}
 
-static int mpp_pprof_serctx_add_function(
-    struct mpp_pprof_serctx *ctx, struct mpp_rb_backtrace_frame *frame, char *errbuf, size_t errbuflen
-) {
-    // Have we already added this function before?
-    if (st_lookup(ctx->added_functions, frame->function_id, NULL)) {
-        return 0;
+    // Set up the location array.
+//    struct perftools_profiles_Location **locations_proto =
+//        perftools_profiles_Profile_resize_location(ctx->profile_proto, loctab->location_count, ctx->arena);
+    struct mpp_pprof_serctx_add_location_ctx loc_add_ctx;
+    loc_add_ctx.i = 0;
+//    loc_add_ctx.location_proto_arr = locations_proto;
+    loc_add_ctx.ctx = ctx;
+    loc_add_ctx.errbuf = errbuf;
+    loc_add_ctx.errbuflen = errbuflen;
+    loc_add_ctx.is_error = 0;
+    mpp_rb_loctab_each_location(ctx->loctab, mpp_pprof_serctx_add_location, &loc_add_ctx);
+    if (loc_add_ctx.is_error) {
+        return -1;
     }
 
-    // No, add it.
-    perftools_profiles_Function *fn_proto = perftools_profiles_Profile_add_function(ctx->profile_proto, ctx->arena);
-    perftools_profiles_Function_set_id(fn_proto, frame->function_id);
-
-#define FN_SET_STRINTERN_FIELD(field, str)                                                                  \
-    do {                                                                                                    \
-        int64_t interned = mpp_strtab_index_of(ctx->strindex, (str));                                       \
-        if (interned == -1) {                                                                               \
-            ruby_snprintf(errbuf, errbuflen, "non-interned string %s passed for Function.#field", (str));   \
-            return -1;                                                                                      \
-        }                                                                                                   \
-        perftools_profiles_Function_set_##field(fn_proto, interned);                                        \
-    } while (0)
-
-    FN_SET_STRINTERN_FIELD(name, frame->function_name);
-    FN_SET_STRINTERN_FIELD(system_name, frame->function_name);
-    FN_SET_STRINTERN_FIELD(filename, frame->filename);
-
-#undef FN_SET_STRINTERN_FIELD
-
-    st_insert(ctx->added_functions, frame->function_id, 0);
-    return 0;
-}
-
-static int mpp_pprof_serctx_add_location(
-    struct mpp_pprof_serctx *ctx, struct mpp_rb_backtrace_frame *frame, char *errbuf, size_t errbuflen
-) {
-    // Have we already added this location before?
-    if (st_lookup(ctx->added_locations, frame->location_id, NULL)) {
-        return 0;
+    // And the same for functions pretty much
+//    struct perftools_profiles_Function **functions_proto =
+//        perftools_profiles_Profile_resize_function(ctx->profile_proto, loctab->location_count, ctx->arena);
+    struct mpp_pprof_serctx_add_function_ctx fn_add_ctx;
+    fn_add_ctx.i = 0;
+//    fn_add_ctx.fn_proto_arr = functions_proto;
+    fn_add_ctx.ctx = ctx;
+    fn_add_ctx.errbuf = errbuf;
+    fn_add_ctx.errbuflen = errbuflen;
+    fn_add_ctx.is_error = 0;
+    mpp_rb_loctab_each_function(ctx->loctab, mpp_pprof_serctx_add_function, &fn_add_ctx);
+    if (loc_add_ctx.is_error) {
+        return -1;
     }
-
-    // No, add it.
-    perftools_profiles_Location *loc_proto = perftools_profiles_Profile_add_location(ctx->profile_proto, ctx->arena);
-    perftools_profiles_Location_set_id(loc_proto, frame->location_id);
-    perftools_profiles_Line *line_proto = perftools_profiles_Location_add_line(loc_proto, ctx->arena);
-    perftools_profiles_Line_set_function_id(line_proto, frame->function_id);
-    perftools_profiles_Line_set_line(line_proto, frame->line_number);
-
-    st_insert(ctx->added_locations, frame->location_id, 0);
 
     return 0;
 }
@@ -139,22 +194,14 @@ static int mpp_pprof_serctx_add_location(
 int mpp_pprof_serctx_add_sample(
     struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen
 ) {
-    int r;
     perftools_profiles_Sample *sample_proto = perftools_profiles_Profile_add_sample(ctx->profile_proto, ctx->arena);
     uint64_t *location_ids =
-        perftools_profiles_Sample_resize_location_id(sample_proto, sample->bt.frames_count, ctx->arena);
+        perftools_profiles_Sample_resize_location_id(sample_proto, sample->bt->frames_count, ctx->arena);
 
     // We need to iterate through this backtrace backwards; Ruby makes it easy for us to get this backtrace
     // in most-recent-call-last format, but pprof wants most-recent-call-first.
-    for (int64_t i = 0; i < sample->bt.frames_count; i++) {
-        struct mpp_rb_backtrace_frame *frame = &sample->bt.frames[sample->bt.frames_count - i - 1];
-        location_ids[i] = frame->location_id;
-
-        // Adds the function & location protos to the main proto by ID, if they're not there already.
-        r = mpp_pprof_serctx_add_function(ctx, frame, errbuf, errbuflen);
-        if (r == -1) return r;
-        mpp_pprof_serctx_add_location(ctx, frame, errbuf, errbuflen);
-        if (r == -1) return r;
+    for (int64_t i = 0; i < sample->bt->frames_count; i++) {
+        location_ids[i] = sample->bt->frame_locations[sample->bt->frames_count - i - 1];
     }
 
     // TODO: values & labels

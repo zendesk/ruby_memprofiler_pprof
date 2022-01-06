@@ -26,12 +26,13 @@ struct collector_cdata {
     size_t sample_count;                // Number of elements currently in the sample list
 
     struct mpp_strtab *string_tab;      // String interning table
+    struct mpp_rb_loctab *loctab;       // Backtrace location table
 };
 
 static void internal_sample_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
     s->refcount--;
     if (!s->refcount) {
-        mpp_rb_backtrace_destroy(&s->bt, cd->string_tab);
+        mpp_rb_backtrace_destroy(cd->loctab, s->bt);
         mpp_free(s);
     }
 }
@@ -72,9 +73,15 @@ static int collector_cdata_gc_memsize_live_objects(st_data_t key, st_data_t valu
     // not also in the allocation sample list.
     if (s->refcount == 1) {
         *acc_ptr += sizeof(*s);
-        *acc_ptr += mpp_rb_backtrace_memsize(&s->bt);
+        *acc_ptr += mpp_rb_backtrace_memsize(s->bt);
     }
     return ST_CONTINUE;
+}
+
+static void collector_cdata_gc_free_loctab(struct collector_cdata *cd) {
+    if (cd->loctab) {
+        mpp_rb_loctab_destroy(cd->loctab);
+    }
 }
 
 static void collector_cdata_gc_free_strtab(struct collector_cdata *cd) {
@@ -105,6 +112,7 @@ static void collector_cdata_gc_free(void *ptr) {
 
     collector_cdata_gc_free_live_object_table(cd);
     collector_cdata_gc_decrement_sample_refcounts(cd);
+    collector_cdata_gc_free_loctab(cd);
     collector_cdata_gc_free_strtab(cd);
 
     mpp_pthread_mutex_unlock(&cd->lock);
@@ -123,10 +131,13 @@ static size_t collector_cdata_memsize(const void *ptr) {
     if (cd->string_tab) {
         sz += mpp_strtab_memsize(cd->string_tab);
     }
+    if (cd->loctab) {
+        sz += mpp_rb_loctab_memsize(cd->loctab);
+    }
     struct mpp_sample *s = cd->samples;
     while (s) {
         sz += sizeof(*s);
-        sz += mpp_rb_backtrace_memsize(&s->bt);
+        sz += mpp_rb_backtrace_memsize(s->bt);
         s = s->next_alloc;
     }
 
@@ -181,30 +192,19 @@ static VALUE collector_alloc(VALUE klass) {
 
 struct newobj_impl_args {
     struct collector_cdata *cd;
+    struct mpp_rb_backtrace *bt;
     VALUE tpval;
+    VALUE newobj;
 };
 
-static VALUE collector_tphook_newobj_impl(VALUE args_as_uintptr) {
+// Collects all the parts of collector_tphook_newobj that could throw.
+static VALUE collector_tphook_newobj_protected(VALUE args_as_uintptr) {
     struct newobj_impl_args *args = (struct newobj_impl_args*)args_as_uintptr;
     struct collector_cdata *cd = args->cd;
     VALUE tpval = args->tpval;
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
-    VALUE newobj = rb_tracearg_object(tparg);
-
-    // Create the sample object.
-    struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
-    // Fill its backtrace
-    mpp_rb_backtrace_init(&sample->bt, cd->string_tab);
-    // Set the sample refcount to two. Once because it's going in the allocation sampling buffer,
-    // and once because it's going in the heap profiling set.
-    sample->refcount = 2;
-    // Insert into allocation profiling list.
-    // TODO: enforce a limit on how many things can go here.
-    sample->next_alloc = cd->samples;
-    cd->samples = sample;
-    // And into the heap profiling list.
-    st_insert(cd->live_objects, newobj, (st_data_t)sample);
-
+    args->newobj = rb_tracearg_object(tparg);
+    mpp_rb_backtrace_capture(cd->loctab, &args->bt);
     return Qnil;
 }
 
@@ -228,21 +228,30 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     struct newobj_impl_args args;
     args.cd = cd;
     args.tpval = tpval;
+    args.bt = NULL;
     int jump_tag;
     VALUE original_errinfo = rb_errinfo();
-    rb_protect(collector_tphook_newobj_impl, (VALUE)&args, &jump_tag);
+    rb_protect(collector_tphook_newobj_protected, (VALUE)&args, &jump_tag);
 
     // Intentionally ignore the jump tag from rb_protect.
     if (jump_tag) {
-        // TODO - delete debugging crap.
-        fprintf(stderr, "got exception from protect\n");
-        VALUE errinfo = rb_errinfo();
-        fprintf(stderr, "errinfo is %lx\n", errinfo);
-        VALUE errinfo_str = rb_funcall(errinfo, rb_intern("inspect"), 0);
-        fprintf(stderr, "string VALUE errinfo is %lx\n", errinfo_str);
-        fprintf(stderr, "exception: %s\n", StringValueCStr(errinfo_str));
-
+        // Free the stuff that was created by _protected above
+        if (args.bt) mpp_rb_backtrace_destroy(cd->loctab, args.bt);
         rb_set_errinfo(original_errinfo);
+    } else {
+        // No error was thrown, add it to our sample buffers.
+        struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
+        // Set the sample refcount to two. Once because it's going in the allocation sampling buffer,
+        // and once because it's going in the heap profiling set.
+        sample->refcount = 2;
+        sample->bt = args.bt;
+
+        // Insert into allocation profiling list.
+        // TODO: enforce a limit on how many things can go here.
+        sample->next_alloc = cd->samples;
+        cd->samples = sample;
+        // And into the heap profiling list.
+        st_insert(cd->live_objects, args.newobj, (st_data_t)sample);
     }
 
     mpp_pthread_mutex_unlock(&cd->lock);
@@ -276,12 +285,14 @@ static VALUE collector_enable_profiling_cimpl(VALUE self) {
 
     collector_cdata_gc_free_live_object_table(cd);
     collector_cdata_gc_decrement_sample_refcounts(cd);
+    collector_cdata_gc_free_loctab(cd);
     collector_cdata_gc_free_strtab(cd);
 
     cd->samples = NULL;
     cd->sample_count = 0;
     cd->live_objects = st_init_numtable();
     cd->string_tab = mpp_strtab_new();
+    cd->loctab = mpp_rb_loctab_new(cd->string_tab);
 
     if (cd->newobj_trace == Qnil) {
         cd->newobj_trace = rb_tracepoint_new(
@@ -368,16 +379,18 @@ static VALUE collector_rotate_profile_cimpl(VALUE self) {
 
     struct mpp_sample *sample_list = cd->samples;
     cd->samples = NULL;
+
+    serctx = mpp_pprof_serctx_new();
+    MPP_ASSERT_MSG(serctx, "mpp_pprof_serctx_new failed??");
+    r = mpp_pprof_serctx_set_loctab(serctx, cd->loctab, errbuf, sizeof(errbuf));
+    if (r == -1) {
+        goto out;
+    }
+
     // Now that we have the samples (and have processed the stringtab) we can
     // yield the lock.
     mpp_pthread_mutex_unlock(&cd->lock);
 
-    serctx = mpp_pprof_serctx_new();
-    MPP_ASSERT_MSG(serctx, "mpp_pprof_serctx_new failed??");
-    r = mpp_pprof_serctx_set_strtab(serctx, cd->string_tab, errbuf, sizeof(errbuf));
-    if (r == -1) {
-        goto out;
-    }
     struct mpp_sample *s = sample_list;
     while (s) {
         r = mpp_pprof_serctx_add_sample(serctx, s, errbuf, sizeof(errbuf));

@@ -1,3 +1,4 @@
+require 'bundler/setup'
 require 'ruby_memprofiler_pprof'
 require_relative 'pprof_pb'
 require "minitest/autorun"

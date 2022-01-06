@@ -73,6 +73,137 @@ rb_vm_frame_method_entry(const rb_control_frame_t *cfp)
     return check_method_entry(ep[VM_ENV_DATA_INDEX_ME_CREF], 1);
 }
 
+// Allocates, initializes and returns a new location table. A location table keeps track of a mapping
+// of (compact!) location IDs to functions/line numbers. This keeps things in a convenient form for
+// later turning to pprof, but also makes sure that we don't store the same char *'s for function/file
+// names over and over again.
+// Requires a reference to a string interning table, which must be valid for the lifetime of this
+// loctab object.
+struct mpp_rb_loctab *mpp_rb_loctab_new(struct mpp_strtab *strtab) {
+    struct mpp_rb_loctab *loctab = mpp_xmalloc(sizeof(struct mpp_rb_loctab));
+    loctab->strtab = strtab;
+    loctab->functions = st_init_numtable();
+    loctab->locations = st_init_numtable();
+    loctab->function_count = 0;
+    loctab->location_count = 0;
+    return loctab;
+}
+
+// Destroys the loctab, including its own memory.
+void mpp_rb_loctab_destroy(struct mpp_rb_loctab *loctab) {
+    st_free_table(loctab->functions);
+    st_free_table(loctab->locations);
+    mpp_free(loctab);
+}
+
+struct fnloc_st_update_args {
+    struct mpp_rb_loctab *loctab;
+    uint64_t location_id;
+    uint64_t function_id;
+    struct mpp_rb_loctab_location *location;
+    struct mpp_rb_loctab_function *function;
+    VALUE fn_name_value;
+    VALUE file_name_value;
+    uint64_t location_line_number;
+    int64_t function_line_number;
+};
+
+
+static int function_st_update(st_data_t *key, st_data_t *value, st_data_t ctx, int exists) {
+    struct fnloc_st_update_args *args = (struct fnloc_st_update_args *)ctx;
+
+    if (exists) {
+        // Function already exists; put it in our outargs
+        args->function = (struct mpp_rb_loctab_function *)*value;
+    } else {
+        // Function doesn't exist; build it.
+        args->function = mpp_xmalloc(sizeof(struct mpp_rb_loctab_function));
+        *value = (st_data_t)args->function;
+        args->function->refcount = 0; // Will be incrmeented in backtrace_capture
+        args->function->id = args->function_id;
+        args->loctab->function_count++;
+
+        mpp_strtab_intern_rbstr(
+            args->loctab->strtab, args->fn_name_value,
+            &args->function->function_name, &args->function->function_name_len
+        );
+
+        if (RTEST(args->file_name_value)) {
+            mpp_strtab_intern_rbstr(
+                args->loctab->strtab, args->file_name_value,
+                &args->function->file_name, &args->function->file_name_len
+            );
+        } else {
+            mpp_strtab_intern_cstr(
+                args->loctab->strtab, "(unknown filename)",
+                &args->function->file_name, &args->function->file_name_len
+            );
+        }
+        args->function->line_number = args->function_line_number;
+    }
+
+    return ST_CONTINUE;
+}
+
+static int location_st_update(st_data_t *key, st_data_t *value, st_data_t ctx, int exists) {
+    struct fnloc_st_update_args *args = (struct fnloc_st_update_args *)ctx;
+
+    if (exists) {
+        // Location already exists - put it in our outargs.
+        args->location = (struct mpp_rb_loctab_location *)*value;
+        args->function = args->location->function;
+    } else {
+        // Location does not already exist. Make a new one.
+        args->location = mpp_xmalloc(sizeof(struct mpp_rb_loctab_location));
+        *value = (st_data_t)args->location;
+        args->location->refcount = 0; // will be incremented in backtrace_capture
+        args->location->id = args->location_id;
+        args->loctab->location_count++;
+
+        // Need to find a _function_ for it too.
+        st_update(args->loctab->functions, args->function_id, function_st_update, (st_data_t)args);
+        args->location->function = args->function;
+        args->location->line_number = args->location_line_number;
+    }
+
+    return ST_CONTINUE;
+}
+
+static int function_st_deref(st_data_t *key, st_data_t *value, st_data_t ctx, int exists) {
+    struct mpp_rb_loctab *loctab = (struct mpp_rb_loctab *)ctx;
+
+    MPP_ASSERT_MSG(exists, "attempted to decrement refcount on non-existing function");
+    struct mpp_rb_loctab_function *fn = (struct mpp_rb_loctab_function *)*value;
+    MPP_ASSERT_MSG(fn->refcount > 0, "attempted to decrement zero refcount on function");
+    fn->refcount--;
+    if (fn->refcount == 0) {
+        // Unref its string table entries.
+        mpp_strtab_release(loctab->strtab, fn->function_name, fn->function_name_len);
+        mpp_strtab_release(loctab->strtab, fn->file_name, fn->file_name_len);
+        mpp_free(fn);
+        loctab->function_count--;
+        return ST_DELETE;
+    }
+    return ST_CONTINUE;
+}
+
+static int location_st_deref(st_data_t *key, st_data_t *value, st_data_t ctx, int exists) {
+    struct mpp_rb_loctab *loctab = (struct mpp_rb_loctab *)ctx;
+
+    MPP_ASSERT_MSG(exists, "attempted to decrement refcount on non-existing location");
+    struct mpp_rb_loctab_location *loc = (struct mpp_rb_loctab_location *)*value;
+    MPP_ASSERT_MSG(loc->refcount > 0, "attempted to decrement zero refcount on location");
+    loc->refcount--;
+    if (loc->refcount == 0) {
+        // Deref its function too.
+        st_update(loctab->functions, loc->function->id, function_st_deref, (st_data_t)loctab);
+        mpp_free(loc);
+        loctab->location_count--;
+        return ST_DELETE;
+    }
+    return ST_CONTINUE;
+}
+
 // Captures a backtrace!
 //
 // This method uses internal Ruby headers to implement a rough copy of what backtrace_each in vm_backtrace.c
@@ -89,7 +220,11 @@ rb_vm_frame_method_entry(const rb_control_frame_t *cfp)
 // protobuf wants them, so they have to be reversed later. It's not so convenient to just capture it in
 // the correct order because we may have to skip some frames; thus if we filled in the frame array backwards,
 // we might not actually wind up filling frames[0].
-void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct mpp_strtab *strtab) {
+//
+// This method allocates a struct mpp_rb_backtrace and saves it to *bt_out. The reason for this awkward
+// calling convention (as opposed to just returning it) is so that the caller can detect if we got longjmp'd
+// out of here by some of the Ruby calls below, and appropriately destroy *bt_out via a call to destroy.
+void mpp_rb_backtrace_capture(struct mpp_rb_loctab *loctab, struct mpp_rb_backtrace **bt_out) {
     const rb_control_frame_t *last_cfp = GET_EC()->cfp;
     const rb_control_frame_t *start_cfp = RUBY_VM_END_CONTROL_FRAME(GET_EC());
 
@@ -106,84 +241,129 @@ void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct mpp_strtab *strta
         max_backtrace_size = start_cfp - last_cfp + 1;
     }
 
-    bt->frames = mpp_xmalloc(sizeof(struct mpp_rb_backtrace_frame) * max_backtrace_size);
+    *bt_out = mpp_xmalloc(sizeof(struct mpp_rb_backtrace));
+    struct mpp_rb_backtrace *bt = *bt_out;
+    bt->frame_locations = mpp_xmalloc(sizeof(uint64_t) * max_backtrace_size);
     // Set bt->frames_count to zero, to start with, and only increment it when we see a frame
     // in the backtrace we can actually understand. We might skip over some of them, so max_backtrace_size
     // is a maximum of how many frames there might be in the backtrace.
     bt->frames_count = 0;
     // But do keep track of the memsize
-    bt->memsize = sizeof(struct mpp_rb_backtrace_frame) * max_backtrace_size;
+    bt->memsize = sizeof(uint64_t) * max_backtrace_size;
 
     ptrdiff_t i;
     const rb_control_frame_t *cfp;
     for (i = 0, cfp = start_cfp; i < max_backtrace_size; i++, cfp = RUBY_VM_NEXT_CONTROL_FRAME(cfp)) {
-        struct mpp_rb_backtrace_frame *frame = &bt->frames[bt->frames_count];
 
+        // Collect all the information we might need about this frame and store it in this struct
+        struct fnloc_st_update_args frame_args;
+        frame_args.loctab = loctab;
         if (cfp->iseq && cfp->pc) {
             // I believe means this backtrace frame is ruby code
-
             size_t iseq_pos = (size_t)(cfp->pc - cfp->iseq->body->iseq_encoded);
-            frame->line_number = rb_iseq_line_no(cfp->iseq, iseq_pos);
+            frame_args.location_line_number = rb_iseq_line_no(cfp->iseq, iseq_pos);
+            frame_args.fn_name_value = rb_iseq_method_name(cfp->iseq);
+            frame_args.file_name_value = rb_iseq_path(cfp->iseq);
+            frame_args.function_line_number = NUM2ULONG(rb_iseq_first_lineno(cfp->iseq));
 
-            // Extract the names and intern them.
-            VALUE function_name_val = rb_iseq_method_name(cfp->iseq);
-            VALUE label_val = rb_iseq_label(cfp->iseq);
-            VALUE filepath_val = rb_iseq_path(cfp->iseq);
-            mpp_strtab_intern_rbstr(strtab, function_name_val, &frame->function_name, &frame->function_name_len);
-            mpp_strtab_intern_rbstr(strtab, label_val, &frame->label, &frame->label_len);
-            mpp_strtab_intern_rbstr(strtab, filepath_val, &frame->filename, &frame->filename_len);
-
-
-            // Calculate the IDs
-            frame->function_id = FIX2ULONG(rb_obj_id(function_name_val));
+            // Use the object ID of the function name (which _should_ be interned, right, and so unique?)
+            // as the function ID.
+            frame_args.function_id = NUM2ULONG(rb_obj_id(frame_args.fn_name_value));
             // Use the lower 48 bits (which is the sizeof an address on x86_64) of the function name,
             // and the line number in the top 16 bits, as the "location id".
             // Guess this won't work reliably if your function has more than 16k lines, in which case...
             // ...just get a better function?
-            frame->location_id = (frame->line_number << 48)  | (frame->function_id & 0x0000FFFFFFFFFFFF);
+            frame_args.location_id =
+                (frame_args.location_line_number << 48)  | (frame_args.function_id & 0x0000FFFFFFFFFFFF);
 
-            bt->frames_count++;
         } else if (RUBYVM_CFUNC_FRAME_P(cfp)) {
             // I believe means that this backtrace frame is a call to a cfunc
+
+
             const rb_callable_method_entry_t *me = rb_vm_frame_method_entry(cfp);
 
-            // We can't have a line number for C code.
-            frame->line_number = 0;
+            frame_args.location_line_number = 0;
+            frame_args.function_line_number = 0;
+            frame_args.fn_name_value = rb_id2str(me->def->original_id);
+            frame_args.file_name_value = Qnil;
 
-            VALUE function_name_val = rb_id2str(me->def->original_id);
-            mpp_strtab_intern_rbstr(strtab, function_name_val, &frame->function_name, &frame->function_name_len);
-            // For cfuncs, the label should just be the same as the function name, I believe.
-            // Note that we are _NOT_ just copying the pointers, to ensure that the intern refcount goes up.
-            mpp_strtab_intern_rbstr(strtab, function_name_val, &frame->label, &frame->label_len);
-            // We can't get a filepath for Cfuncs. Just use the string "(cfunc)"
-            mpp_strtab_intern(strtab, "(cfunc)", MPP_STRTAB_USE_STRLEN, &frame->filename, &frame->filename_len);
-
-            // As for IDs - use the symbol ID of the method name (which is interned forever) as both the function
+            // Use the symbol ID of the method name (which is interned forever) as both the function
             // ID and the location ID (since we have no line numbers).
-            frame->function_id = me->def->original_id;
-            frame->location_id = me->def->original_id;
-
-            bt->frames_count++;
+            frame_args.location_id = me->def->original_id;
+            frame_args.function_id = me->def->original_id;
         } else {
             // No idea what this means. It's silently ignored in vm_backtrace.c. Guess we will too.
+            continue;
         }
+
+        // Store the location frame.
+        bt->frame_locations[bt->frames_count] = frame_args.location_id;
+        bt->frames_count++;
+
+        // Lookup, or allocate & store, the location/function struct.
+        st_update(loctab->locations, frame_args.location_id, location_st_update, (st_data_t)&frame_args);
+        // Either we created a new one, or looked up an existing one, but either way we need to bump its refcount.
+        frame_args.location->refcount++;
+        frame_args.function->refcount++;
     }
 }
 
-void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt, struct mpp_strtab *strtab) {
-    // Decrement the refcount on each interned string.
+void mpp_rb_backtrace_destroy(struct mpp_rb_loctab *loctab, struct mpp_rb_backtrace *bt) {
     for (int64_t i = 0; i < bt->frames_count; i++) {
-        struct mpp_rb_backtrace_frame *frame = &bt->frames[i];
-        mpp_strtab_release(strtab, frame->filename, frame->filename_len);
-        mpp_strtab_release(strtab, frame->function_name, frame->function_name_len);
-        mpp_strtab_release(strtab, frame->label, frame->label_len);
+        st_update(loctab->locations, bt->frame_locations[i], location_st_deref, (st_data_t)loctab);
     }
-
-    mpp_free(bt->frames);
-    bt->frames_count = 0;
-    bt->memsize = 0;
+    mpp_free(bt->frame_locations);
+    mpp_free(bt);
 }
 
 size_t mpp_rb_backtrace_memsize(struct mpp_rb_backtrace *bt) {
     return bt->memsize;
+}
+
+size_t mpp_rb_loctab_memsize(struct mpp_rb_loctab *loctab) {
+    return sizeof(*loctab) +
+        sizeof(struct mpp_rb_loctab_location) * loctab->location_count +
+        sizeof(struct mpp_rb_loctab_function) * loctab->function_count +
+        st_memsize(loctab->locations) +
+        st_memsize(loctab->functions);
+}
+
+struct mpp_rb_loctab_each_location_ctx {
+    mpp_rb_loctab_each_location_cb cb;
+    void *cb_ctx;
+    struct mpp_rb_loctab *loctab;
+};
+
+static int mpp_rb_loctab_each_location_thunk(st_data_t key, st_data_t value, st_data_t ctx) {
+    struct mpp_rb_loctab_each_location_ctx * thunkctx = (struct mpp_rb_loctab_each_location_ctx *)ctx;
+    struct mpp_rb_loctab_location *loc = (struct mpp_rb_loctab_location *)value;
+    return thunkctx->cb(thunkctx->loctab, loc, thunkctx->cb_ctx);
+}
+
+void mpp_rb_loctab_each_location(struct mpp_rb_loctab *loctab, mpp_rb_loctab_each_location_cb cb, void *ctx) {
+    struct mpp_rb_loctab_each_location_ctx thunkctx;
+    thunkctx.loctab = loctab;
+    thunkctx.cb = cb;
+    thunkctx.cb_ctx = ctx;
+    st_foreach(loctab->locations, mpp_rb_loctab_each_location_thunk, (st_data_t)&thunkctx);
+}
+
+struct mpp_rb_loctab_each_function_ctx {
+    mpp_rb_loctab_each_function_cb cb;
+    void *cb_ctx;
+    struct mpp_rb_loctab *loctab;
+};
+
+static int mpp_rb_loctab_each_function_thunk(st_data_t key, st_data_t value, st_data_t ctx) {
+    struct mpp_rb_loctab_each_function_ctx * thunkctx = (struct mpp_rb_loctab_each_function_ctx *)ctx;
+    struct mpp_rb_loctab_function *loc = (struct mpp_rb_loctab_function *)value;
+    return thunkctx->cb(thunkctx->loctab, loc, thunkctx->cb_ctx);
+}
+
+void mpp_rb_loctab_each_function(struct mpp_rb_loctab *loctab, mpp_rb_loctab_each_function_cb cb, void *ctx) {
+    struct mpp_rb_loctab_each_function_ctx thunkctx;
+    thunkctx.loctab = loctab;
+    thunkctx.cb = cb;
+    thunkctx.cb_ctx = ctx;
+    st_foreach(loctab->functions, mpp_rb_loctab_each_function_thunk, (st_data_t)&thunkctx);
 }

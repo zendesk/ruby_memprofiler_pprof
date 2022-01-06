@@ -121,7 +121,7 @@ void mpp_assert_fail(
     do {                                                                                        \
         int32_t seg_len = (int32_t)strlen(str);                                                 \
         int32_t copy_n = (seg_len > final_msg_remaining) ? final_msg_remaining : seg_len;       \
-        memcpy(final_msg_buf, str, copy_n);                                                    \
+        memcpy(final_msg_buf + final_msg_ix, str, copy_n);                                      \
         final_msg_ix += seg_len;                                                                \
         final_msg_remaining -= seg_len;                                                         \
     } while (0)

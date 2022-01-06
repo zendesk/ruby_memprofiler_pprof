@@ -205,6 +205,14 @@ void mpp_strtab_intern(
     mpp_strtab_intern_impl(tab, str, str_len, interned_str_out, interned_str_len_out);
 }
 
+// Does what mpp_strtab_intern does, but calculates the length from strlen()
+void mpp_strtab_intern_cstr(
+    struct mpp_strtab *tab, const char *str, const char **interned_str_out, size_t *interned_str_len_out
+) {
+    int str_len = (int)strlen(str);
+    mpp_strtab_intern_impl(tab, str, str_len, interned_str_out, interned_str_len_out);
+}
+
 static VALUE mpp_strtab_stringify_value(VALUE val) {
     return rb_sprintf("%"PRIsVALUE, val);
 }

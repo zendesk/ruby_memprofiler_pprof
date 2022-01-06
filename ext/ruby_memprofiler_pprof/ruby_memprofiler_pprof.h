@@ -145,6 +145,10 @@ void mpp_strtab_intern_rbstr(
     struct mpp_strtab *tab, VALUE rbstr,
     const char **interned_str_out, size_t *interned_str_len_out
 );
+void mpp_strtab_intern_cstr(
+    struct mpp_strtab *tab, const char *str,
+    const char **interned_str_out, size_t *interned_str_len_out
+);
 
 // Decrement the refcount of elements in the intern table.
 void mpp_strtab_release(struct mpp_strtab *tab, const char *str, size_t str_len);
@@ -159,49 +163,70 @@ typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size
 void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *ctx);
 
 // ======== BACKTRACE DECLARATIONS ========
-struct mpp_rb_backtrace_frame {
-    // The (null-terminated, interned) filename. Might just be "(native code)" or such
-    // for C extensions. And its size, not including termination.
-    const char *filename;
-    size_t filename_len;
-    // Line number in the filename. Might be zero if we can't compute it, or for C
-    // extensions.
-    int64_t line_number;
-    // The (null terminated, interned) function name, and its size (not including termination)
-    const char *function_name;
-    size_t function_name_len;
-    // The (null terminated, interned) label name. This might be the same as the function
-    // name, or it might be something "block in <method>". And its size.
-    const char *label;
-    size_t label_len;
-    // A "function id". This is a value that is supposed to uniquely identify the function
-    // in this process, but has no meaning outside of the context of this particular process.
-    // See backtrace.c for a description of how this is computed.
-    uint64_t function_id;
-    // A "location id" - this is supposed to uniquely identify a line of code (within the
-    // context of this process, like function_id).
-    uint64_t location_id;
-};
-
 struct mpp_rb_backtrace {
     // The array of frames - most recent call FIRST.
-    struct mpp_rb_backtrace_frame *frames;
+    uint64_t *frame_locations;
     int64_t frames_count;
     // Memory size of frames, which might actually be bigger than
-    // sizeof(struct mpp_rb_backtrace_frame) * frames_count
+    // sizeof(frame_locations[0]) * frames_count
     size_t memsize;
 };
 
-// Capture a (current) backtrace, and free it.
-// Note that the free function does NOT free the struct mpp_rb_backtrace itself.
-void mpp_rb_backtrace_init(struct mpp_rb_backtrace *bt, struct mpp_strtab *strtab);
-void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt, struct mpp_strtab *strtab);
+struct mpp_rb_loctab_function {
+    // Refcount
+    int refcount;
+    // Interned pointer to function name
+    const char *function_name;
+    size_t function_name_len;
+    // Interned pointer to file name
+    const char *file_name;
+    size_t file_name_len;
+    // Line number where the function starts
+    int64_t line_number;
+    // Function ID of self
+    uint64_t id;
+};
+
+struct mpp_rb_loctab_location {
+    // Refcount
+    int refcount;
+    // Function & line number. Note that we do _NOT_ hold a reference
+    // to the function here. Instead, each backtrace frame holds a reference
+    // to both the function and the location.
+    struct mpp_rb_loctab_function *function;
+    // Line number
+    int64_t line_number;
+    // Location id of self
+    uint64_t id;
+};
+
+struct mpp_rb_loctab {
+    // The table of (uint64_t location_id) -> (struct mpp_rb_loctab_location *)
+    st_table *locations;
+    int64_t location_count;
+    // The table of (uint64_t function_id) -> (struct mpp_rb_locatab_function *)
+    st_table *functions;
+    int64_t function_count;
+    // The string interning table that all the names are related to
+    struct mpp_strtab *strtab;
+};
+
+struct mpp_rb_loctab *mpp_rb_loctab_new(struct mpp_strtab *strtab);
+void mpp_rb_loctab_destroy(struct mpp_rb_loctab *loctab);
+void mpp_rb_backtrace_capture(struct mpp_rb_loctab *locatb, struct mpp_rb_backtrace **bt_out);
+void mpp_rb_backtrace_destroy(struct mpp_rb_loctab *locatb, struct mpp_rb_backtrace *bt);
 size_t mpp_rb_backtrace_memsize(struct mpp_rb_backtrace *bt);
+size_t mpp_rb_loctab_memsize(struct mpp_rb_loctab *loctab);
+typedef int (*mpp_rb_loctab_each_location_cb)(struct mpp_rb_loctab *loctab, struct mpp_rb_loctab_location *loc, void *ctx);
+void mpp_rb_loctab_each_location(struct mpp_rb_loctab *loctab, mpp_rb_loctab_each_location_cb cb, void *ctx);
+typedef int (*mpp_rb_loctab_each_function_cb)(struct mpp_rb_loctab *loctab, struct mpp_rb_loctab_function *loc, void *ctx);
+void mpp_rb_loctab_each_function(struct mpp_rb_loctab *loctab, mpp_rb_loctab_each_function_cb cb, void *ctx);
+
 
 // ======= MAIN DATA STRUCTURE DECLARATIONS ========
 struct mpp_sample {
     // The backtrace for this sample
-    struct mpp_rb_backtrace bt;
+    struct mpp_rb_backtrace *bt;
     // Sample has a refcount - because it's used both in the heap profiling and in the allocation profiling.
     int64_t refcount;
     // Next element in the allocation profiling sample list. DO NOT use this in the heap profiling table.
@@ -215,13 +240,11 @@ struct mpp_pprof_serctx {
     // freed.
     upb_alloc allocator;
     upb_arena *arena;
+    // Location table used for looking up fucntion & location IDs to strings.
+    struct mpp_rb_loctab *loctab;
     // String intern index; recall that holding this object does _not_ require that we have exclusive
     // use of the underlying string intern table, so it's safe for us to use this in a separate thread.
     struct mpp_strtab_index *strindex;
-    // Mapping of (uint64_t) -> 0 (so basically a set) for whether function & location IDs have already
-    // been inserted into *profile_proto
-    st_table *added_functions;
-    st_table *added_locations;
     // The protobuf representation we are building up.
     perftools_profiles_Profile *profile_proto;
 
@@ -234,7 +257,7 @@ struct mpp_pprof_serctx {
 
 struct mpp_pprof_serctx *mpp_pprof_serctx_new();
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
-int mpp_pprof_serctx_set_strtab(struct mpp_pprof_serctx *ctx, struct mpp_strtab *strtab, char *errbuf, size_t errbuflen);
+int mpp_pprof_serctx_set_loctab(struct mpp_pprof_serctx *ctx, struct mpp_rb_loctab *loctab, char *errbuf, size_t errbuflen);
 int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen);
 int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen);
 
