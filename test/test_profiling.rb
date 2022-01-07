@@ -2,12 +2,11 @@ require_relative 'test_helper'
 
 describe MemprofilerPprof::Collector do
   it 'captures backtraces for memory allocations' do
-    c = MemprofilerPprof::Collector.new
-    c.sample_rate = 1.0
-    c.start_profiling!
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
+    c.start!
     xx = dummy_fn1
-    profile_bytes = c.rotate_profile!
-    c.stop_profiling!
+    profile_bytes = c.flush
+    c.stop!
 
     # Make sure stuff did actually get allocated
     assert_equal 4096, xx.size

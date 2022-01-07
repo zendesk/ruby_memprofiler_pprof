@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -18,8 +19,9 @@ struct collector_cdata {
     st_table *live_objects;             // List of currently-live objects we sampled
     uint32_t u32_sample_rate;           // How often (as a fraction of UINT32_MAX) we should sample allocations; must
                                         //   be accessed through atomics.
-    int is_tracing;                     // This flag is used to make sure we detach our tracepoints as we're
+    bool is_tracing;                    // This flag is used to make sure we detach our tracepoints as we're
                                         //   getting GC'd.
+    int64_t max_samples;                // Max number of samples to collect in the *samples buffer.
 
     pthread_mutex_t lock;               // Internal lock for sample list
     struct mpp_sample *samples;         // Head of a linked list of samples
@@ -190,6 +192,87 @@ static VALUE collector_alloc(VALUE klass) {
     return v;
 }
 
+struct initialize_protected_args {
+    int argc;
+    VALUE *argv;
+    VALUE self;
+    struct collector_cdata *cd;
+};
+
+static VALUE collector_initialize_protected(VALUE vargs) {
+    struct initialize_protected_args *args = (struct initialize_protected_args *)vargs;
+    struct collector_cdata *cd = args->cd;
+
+    // Argument parsing
+    VALUE kwargs_hash = Qnil;
+    rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, args->argc, args->argv, "00:", &kwargs_hash);
+    VALUE kwarg_values[2];
+    ID kwarg_ids[2];
+    kwarg_ids[0] = rb_intern("sample_rate");
+    kwarg_ids[1] = rb_intern("max_samples");
+    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 2, kwarg_values);
+
+    // Default values...
+    if (kwarg_values[0] == Qundef) kwarg_values[0] = DBL2NUM(0.01);
+    if (kwarg_values[1] == Qundef) kwarg_values[1] = LONG2NUM(10000);
+
+    // Convert the double sample rate (between 0 and 1) to a value between 0 and UINT32_MAX
+    // Don't know if setting it with an atomic is _strictly_ nescessary, but I did say
+    // "all access to u32_sample_rate is through atomics" so it's probably easier to than not.
+    __atomic_store_n(&cd->u32_sample_rate, (uint32_t)(UINT32_MAX * NUM2DBL(kwarg_values[0])), __ATOMIC_SEQ_CST);
+    cd->max_samples = NUM2LONG(kwarg_values[1]);
+
+    return Qnil;
+}
+
+static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
+    // Need to do this rb_protect dance to ensure that all access to collector_cdata is through the mutex.
+    struct initialize_protected_args args;
+    args.argc = argc;
+    args.argv = argv;
+    args.self = self;
+    args.cd = collector_cdata_get(self);
+
+    mpp_pthread_mutex_lock(&args.cd->lock);
+    int jump_tag = 0;
+    VALUE r = rb_protect(collector_initialize_protected, (VALUE)&args, &jump_tag);
+    mpp_pthread_mutex_unlock(&args.cd->lock);
+    if (jump_tag) rb_jump_tag(jump_tag);
+    return r;
+}
+
+static VALUE collector_get_sample_rate(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    uint32_t sample_rate = __atomic_load_n(&cd->u32_sample_rate, __ATOMIC_SEQ_CST);
+    return DBL2NUM(((double)sample_rate)/UINT32_MAX);
+}
+
+static VALUE collector_set_sample_rate(VALUE self, VALUE newval) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    double dbl_sample_rate = NUM2DBL(newval);
+    // Convert the double sample rate (between 0 and 1) to a value between 0 and UINT32_MAX
+    uint32_t new_sample_rate_uint = UINT32_MAX * dbl_sample_rate;
+    __atomic_store_n(&cd->u32_sample_rate, new_sample_rate_uint, __ATOMIC_SEQ_CST);
+    return newval;
+}
+
+static VALUE collector_get_max_samples(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    mpp_pthread_mutex_lock(&cd->lock);
+    int64_t v = cd->max_samples;
+    mpp_pthread_mutex_unlock(&cd->lock);
+    return LONG2NUM(v);
+}
+
+static VALUE collector_set_max_samples(VALUE self, VALUE newval) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    int64_t v = NUM2LONG(newval);
+    mpp_pthread_mutex_lock(&cd->lock);
+    cd->max_samples = v;
+    mpp_pthread_mutex_unlock(&cd->lock);
+    return newval;
+}
+
 struct newobj_impl_args {
     struct collector_cdata *cd;
     struct mpp_rb_backtrace *bt;
@@ -278,21 +361,8 @@ static void collector_tphook_freeobj(VALUE tpval, void *data) {
     mpp_pthread_mutex_unlock(&cd->lock);
 }
 
-static VALUE collector_enable_profiling_cimpl(VALUE self) {
+static VALUE collector_start_protected(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
-
-    mpp_pthread_mutex_lock(&cd->lock);
-
-    collector_cdata_gc_free_live_object_table(cd);
-    collector_cdata_gc_decrement_sample_refcounts(cd);
-    collector_cdata_gc_free_loctab(cd);
-    collector_cdata_gc_free_strtab(cd);
-
-    cd->samples = NULL;
-    cd->sample_count = 0;
-    cd->live_objects = st_init_numtable();
-    cd->string_tab = mpp_strtab_new();
-    cd->loctab = mpp_rb_loctab_new(cd->string_tab);
 
     if (cd->newobj_trace == Qnil) {
         cd->newobj_trace = rb_tracepoint_new(
@@ -306,49 +376,73 @@ static VALUE collector_enable_profiling_cimpl(VALUE self) {
     }
     rb_tracepoint_enable(cd->newobj_trace);
     rb_tracepoint_enable(cd->freeobj_trace);
-    cd->is_tracing = 1;
-
-    mpp_pthread_mutex_unlock(&cd->lock);
-
     return Qnil;
 }
 
-static VALUE collector_disable_profiling_cimpl(VALUE self) {
+static VALUE collector_start(VALUE self) {
+    int jump_tag = 0;
     struct collector_cdata *cd = collector_cdata_get(self);
-
     mpp_pthread_mutex_lock(&cd->lock);
+    if (cd->is_tracing) goto out;
 
+    // Do the things that might throw first.
+    rb_protect(collector_start_protected, self, &jump_tag);
+    if (jump_tag) goto out;
+
+    // Now it's safe to allocate our memory here without risk of it getting
+    // stranded. Note that the tracepoint we installed above cannot actually _run_
+    // until we release the lock below so it's perfectly safe to have the tracepoint
+    // installed right now.
+    collector_cdata_gc_free_live_object_table(cd);
+    collector_cdata_gc_decrement_sample_refcounts(cd);
+    collector_cdata_gc_free_loctab(cd);
+    collector_cdata_gc_free_strtab(cd);
+
+    cd->samples = NULL;
+    cd->sample_count = 0;
+    cd->live_objects = st_init_numtable();
+    cd->string_tab = mpp_strtab_new();
+    cd->loctab = mpp_rb_loctab_new(cd->string_tab);
+    cd->is_tracing = true;
+
+out:
+    mpp_pthread_mutex_unlock(&cd->lock);
+    if (jump_tag) {
+        rb_jump_tag(jump_tag);
+    }
+    return Qnil;
+}
+
+static VALUE collector_stop_protected(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
     rb_tracepoint_disable(cd->newobj_trace);
     rb_tracepoint_disable(cd->freeobj_trace);
-    cd->is_tracing = 0;
-
-    // Don't clear any of our buffers - it's OK to access the profiling info after calling disable_profiling!
-
-    mpp_pthread_mutex_unlock(&cd->lock);
-
-
     return Qnil;
 }
 
-static VALUE collector_get_sample_rate_cimpl(VALUE self) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-    uint32_t sample_rate = __atomic_load_n(&cd->u32_sample_rate, __ATOMIC_SEQ_CST);
-    return rb_dbl2big(((double)sample_rate)/UINT32_MAX);
-}
-
-static VALUE collector_set_sample_rate_cimpl(VALUE self, VALUE new_sample_rate_value) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-    double dbl_sample_rate = rb_num2dbl(new_sample_rate_value);
-    // Convert the double sample rate (between 0 and 1) to a value between 0 and UINT32_MAX
-    uint32_t new_sample_rate_uint = UINT32_MAX * dbl_sample_rate;
-    __atomic_store_n(&cd->u32_sample_rate, new_sample_rate_uint, __ATOMIC_SEQ_CST);
-    return Qnil;
-}
-
-static VALUE collector_get_running_cimpl(VALUE self) {
+static VALUE collector_stop(VALUE self) {
+    int jump_tag = 0;
     struct collector_cdata *cd = collector_cdata_get(self);
     mpp_pthread_mutex_lock(&cd->lock);
-    int running = cd->is_tracing;
+    if (!cd->is_tracing) goto out;
+
+    rb_protect(collector_stop_protected, self, &jump_tag);
+    if (jump_tag) goto out;
+
+    cd->is_tracing = false;
+    // Don't clear any of our buffers - it's OK to access the profiling info after calling stop!
+out:
+    mpp_pthread_mutex_unlock(&cd->lock);
+    if (jump_tag) {
+        rb_jump_tag(jump_tag);
+    }
+    return Qnil;
+}
+
+static VALUE collector_is_running(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    mpp_pthread_mutex_lock(&cd->lock);
+    bool running = cd->is_tracing;
     mpp_pthread_mutex_unlock(&cd->lock);
     return running ? Qtrue : Qfalse;
 }
@@ -364,7 +458,7 @@ static VALUE collector_rotate_profile_cimpl_prepresult(VALUE vargs) {
     return rb_str_new(args->pprofbuf, args->pprofbuf_len);
 }
 
-static VALUE collector_rotate_profile_cimpl(VALUE self) {
+static VALUE collector_flush(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
     struct mpp_pprof_serctx *serctx = NULL;
     char *buf_out;
@@ -435,10 +529,13 @@ void mpp_setup_collector_class() {
     cCollector = rb_define_class_under(mMemprofilerPprof, "Collector", rb_cObject);
     rb_define_alloc_func(cCollector, collector_alloc);
 
-    rb_define_private_method(cCollector, "enable_profiling_cimpl", collector_enable_profiling_cimpl, 0);
-    rb_define_private_method(cCollector, "disable_profiling_cimpl", collector_disable_profiling_cimpl, 0);
-    rb_define_private_method(cCollector, "get_sample_rate_cimpl", collector_get_sample_rate_cimpl, 0);
-    rb_define_private_method(cCollector, "set_sample_rate_cimpl", collector_set_sample_rate_cimpl, 1);
-    rb_define_private_method(cCollector, "rotate_profile_cimpl", collector_rotate_profile_cimpl, 0);
-    rb_define_private_method(cCollector, "get_running_cimpl", collector_get_running_cimpl, 0);
+    rb_define_method(cCollector, "initialize", collector_initialize, -1);
+    rb_define_method(cCollector, "sample_rate", collector_get_sample_rate, 0);
+    rb_define_method(cCollector, "sample_rate=", collector_set_sample_rate, 1);
+    rb_define_method(cCollector, "max_samples", collector_get_max_samples, 0);
+    rb_define_method(cCollector, "max_samples=", collector_set_max_samples, 1);
+    rb_define_method(cCollector, "running?", collector_is_running, 0);
+    rb_define_method(cCollector, "start!", collector_start, 0);
+    rb_define_method(cCollector, "stop!", collector_stop, 0);
+    rb_define_method(cCollector, "flush", collector_flush, 0);
 }

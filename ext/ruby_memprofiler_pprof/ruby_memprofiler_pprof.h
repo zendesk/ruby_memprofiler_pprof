@@ -24,6 +24,7 @@
 #endif
 
 #ifndef RB_PASS_KEYWORDS
+#define RB_SCAN_ARGS_LAST_HASH_KEYWORDS 3
 #define rb_scan_args_kw(kw, c, v, s, ...) rb_scan_args(c, v, s, __VA_ARGS__)
 #endif
 

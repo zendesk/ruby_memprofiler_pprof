@@ -15,6 +15,8 @@ end
 
 # Support GC.compact on Ruby >=- 2.7
 have_func("rb_gc_mark_movable", ["ruby.h"])
+# Handle Ractors
+have_func("rb_ext_ractor_safe", ["ruby.h"])
 
 # Find a random number generator API that doesn't have global state.
 has_arc4random = have_func("arc4random", ["stdlib.h"])

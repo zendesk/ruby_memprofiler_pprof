@@ -78,43 +78,43 @@ end
 
 
 Benchmark.bm(20) do |b|
-  # leak_pit = []
-  # sc = benchmark_scenario.dup
-  # GC.start
-  # b.report("default1") do
-  #   benchmark_machine(sc, leak_pit)
-  # end
-  #
-  # leak_pit = []
-  # sc = benchmark_scenario.dup
-  # GC.start
-  # b.report("default2") do
-  #   benchmark_machine(sc, leak_pit)
-  # end
+  leak_pit = []
+  sc = benchmark_scenario.dup
+  GC.start
+  b.report("default1") do
+    benchmark_machine(sc, leak_pit)
+  end
+
+  leak_pit = []
+  sc = benchmark_scenario.dup
+  GC.start
+  b.report("default2") do
+    benchmark_machine(sc, leak_pit)
+  end
 
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
   $collector = MemprofilerPprof::Collector.new
   $collector.sample_rate = 0.01
-  # b.report("with_profiling") do
-  #   $collector.start_profiling!
-  #
-  #   benchmark_machine(sc, leak_pit)
-  #
-  #   $collector.stop_profiling!
-  # end
+  b.report("with_profiling") do
+    $collector.start!
+
+    benchmark_machine(sc, leak_pit)
+
+    $collector.stop!
+  end
 
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
   b.report("with_report") do
-    $collector.start_profiling!
+    $collector.start!
 
     benchmark_machine(sc, leak_pit)
     File.open('tmp/benchmark.pb.gz', 'w') do |f|
-      f.write $collector.rotate_profile!
+      f.write $collector.flush
     end
-    $collector.stop_profiling!
+    $collector.stop!
   end
 end
