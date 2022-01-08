@@ -67,3 +67,14 @@ def stack_ends_with?(stack, segment)
   return false if segment.size > stack.size
   segment.reverse == stack[0...segment.size]
 end
+
+def stack_contains?(stack, segment)
+  return false if segment.size > stack.size
+  (0..(stack.size - segment.size)).any? do |i|
+    segment.reverse == stack[i...segment.size]
+  end
+end
+
+def total_allocations(pprof)
+  pprof.sample.size
+end
