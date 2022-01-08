@@ -4,7 +4,7 @@ require "rake/testtask"
 require "bump/tasks"
 require "private_gem/tasks"
 
-gemspec = Gem::Specification.load("ruby_memprofiler_pprof.gemspec.gemspec")
+gemspec = Gem::Specification.load("ruby_memprofiler_pprof.gemspec")
 Rake::ExtensionTask.new do |ext|
   ext.name = "ruby_memprofiler_pprof_ext"
   ext.source_pattern = "*.{c,h}"
