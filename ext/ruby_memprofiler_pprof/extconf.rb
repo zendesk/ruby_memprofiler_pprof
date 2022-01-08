@@ -39,8 +39,6 @@ internal_headers = proc {
     have_header("version.h")
 }
 
-
-
 dir_config('ruby')
 unless Debase::RubyCoreSource.create_makefile_with_core(internal_headers, "ruby_memprofiler_pprof_ext")
   STDERR.print("Makefile creation failed\n")
@@ -51,13 +49,44 @@ unless Debase::RubyCoreSource.create_makefile_with_core(internal_headers, "ruby_
   exit(1)
 end
 
-# Append some stuff to the Makefile, to set CFLAGS slightly differently for objects that
-# we do not control (the upb stuff)
+# We embed an entire copy of upb (https://github.com/protocolbuffers/upb) in our source tree, to compile
+# it with us and avoid requiring our users to have protoc/the runtime library to install the gem. This is
+# important because there is no release or anything like that of UPB; in fact, it contains this warning:
+#
+#     While upb offers a C API, the C API & ABI are not stable. For this reason, upb is not generally
+#     offered as a C library for direct consumption, and there are no releases.
+#
+# So, the safest way to deal with this lack of API compatibility is to just embed it. This part of the
+# script below hacks at the generated makefile that extconf.rb generated, to add targets to build libupb.a
+# (which would _normally_ be built by Bazel, but we don't want to make installers of our gem have that
+# either; hence, these hand-written Makefile rules below)
+#
+# This strategy of simply embedding the upb source is endorsed by the maintainers here:
+# https://github.com/protocolbuffers/upb/pull/480
 File.open('Makefile', 'a') do |f|
-  upb_objs = Dir["#{$srcdir}/*.upb.c"].map { |f| File.basename(f, ".upb.c") + ".upb.o" }
   f.puts <<~MAKEFILE
-    UPB_OBJS=upb.o #{upb_objs.join ' '}
-    $(UPB_OBJS): CFLAGS += -Wno-shorten-64-to-32 -Wno-sign-compare -Wno-implicit-fallthrough -Wno-clobbered -Wno-maybe-uninitialized
+    UPB_OBJS += $(addprefix vendor/upb/upb/,decode.o encode.o msg.o table.o upb.o)
+    UPB_OBJS += vendor/upb/third_party/utf8_range/utf8_range.o
+    UPB_HDRS += $(wildcard $(srcdir)/vendor/upb/upb/*.h)
+    UPB_HDRS += $(wildcard $(srcdir)/vendor/upb/third_party/utf8_range/*.h)
+    UPB_LIB := vendor/upb/libupb.a
+    UPB_CFLAGS += -Wno-shorten-64-to-32 -Wno-sign-compare -Wno-implicit-fallthrough
+    UPB_CFLAGS += -Wno-clobbered -Wno-maybe-uninitialized
+
+    $(UPB_OBJS): CFLAGS += $(UPB_CFLAGS)
+    $(UPB_OBJS): $(UPB_HDRS)
+    $(UPB_OBJS): %.o : $(srcdir)/%.c
+    \t$(ECHO) compiling $(<)
+    \t$(Q) $(MAKEDIRS) $(@D)
+    \t$(Q) $(CC) $(INCFLAGS) $(CPPFLAGS) $(CFLAGS) $(COUTFLAG)$@ -c $(CSRCFLAG)$<
+    $(UPB_LIB): $(UPB_OBJS)
+    \t$(ECHO) linking static library $@
+    \t$(Q) $(AR) rcs $@ $^
+
+    $(TARGET_SO): $(UPB_LIB)
+    $(TARGET_SO): LOCAL_LIBS += $(UPB_LIB)
+    CFLAGS += -I$(srcdir)/vendor/upb
+    %.upb.o: CFLAGS += $(UPB_CFLAGS)
   MAKEFILE
 
   # Make Make automatically verbose if specified

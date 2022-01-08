@@ -12,7 +12,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpragmas"
 #pragma GCC diagnostic ignored "-Wshorten-64-to-32"
-#include "upb.h"
+#include <upb/upb.h>
 #include "pprof.upb.h"
 #pragma GCC diagnostic pop
 
