@@ -47,6 +47,32 @@ describe MemprofilerPprof::Collector do
     assert_in_delta(gc_stat_allocations, profiled_allocations, 3)
   end
 
+  it 'captures allocation sizes' do
+    def big_allocation_func
+      SecureRandom.hex(50000)
+    end
+
+    def medium_allocation_func
+      SecureRandom.hex(5000)
+    end
+
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
+
+    c.start!
+    big_allocation_func
+    medium_allocation_func
+    profile_bytes = c.flush
+    c.stop!
+
+    pprof = decode_pprof(profile_bytes)
+    big_bytes = allocation_size_sum_under(pprof, 'big_allocation_func')
+    medium_bytes = allocation_size_sum_under(pprof, 'medium_allocation_func')
+
+    assert_operator big_bytes, :>=, 50000
+    assert_operator medium_bytes, :>=,  5000
+    assert_operator medium_bytes, :<, 10000
+  end
+
   it 'captures allocations in multiple ractors' do
     skip "Ractors can't work with newobj tracepoints: https://bugs.ruby-lang.org/issues/18464"
     skip "Ractors not available in Ruby #{RUBY_VERSION}" unless defined?(::Ractor)

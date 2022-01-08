@@ -16,7 +16,7 @@ VALUE cCollector;
 struct collector_cdata {
     VALUE newobj_trace;                 // Ruby Tracepoint object for newobj hook
     VALUE freeobj_trace;                // Ruby Tracepoint object for freeobj hook
-    st_table *live_objects;             // List of currently-live objects we sampled
+    VALUE creturn_trace;                // Ruby Tracepoint for C return hook
     uint32_t u32_sample_rate;           // How often (as a fraction of UINT32_MAX) we should sample allocations; must
                                         //   be accessed through atomics.
     bool is_tracing;                    // This flag is used to make sure we detach our tracepoints as we're
@@ -26,6 +26,9 @@ struct collector_cdata {
     pthread_mutex_t lock;               // Internal lock for sample list
     struct mpp_sample *samples;         // Head of a linked list of samples
     size_t sample_count;                // Number of elements currently in the sample list
+    st_table *live_objects;             // List of currently-live objects we sampled
+    int64_t pending_size_count;         // Number of objects that have been allocated since the last creturn and
+                                        //     are pending having their size calculated.
 
     struct mpp_strtab *string_tab;      // String interning table
     struct mpp_rb_loctab *loctab;       // Backtrace location table
@@ -96,6 +99,7 @@ static void collector_cdata_gc_mark(void *ptr) {
     struct collector_cdata *cd = (struct collector_cdata *)ptr;
     rb_gc_mark_movable(cd->newobj_trace);
     rb_gc_mark_movable(cd->freeobj_trace);
+    rb_gc_mark_movable(cd->creturn_trace);
 }
 
 static void collector_cdata_gc_free(void *ptr) {
@@ -146,12 +150,15 @@ static size_t collector_cdata_memsize(const void *ptr) {
     return sz;
 }
 
+
 #ifdef HAVE_RB_GC_MARK_MOVABLE
 // Support VALUES we're tracking being moved away in Ruby 2.7+ with GC.compact
 static void collector_cdata_gc_compact(void *ptr) {
     struct collector_cdata *cd = (struct collector_cdata *)ptr;
     cd->newobj_trace = rb_gc_location(cd->newobj_trace);
     cd->freeobj_trace = rb_gc_location(cd->freeobj_trace);
+    cd->creturn_trace = rb_gc_location(cd->creturn_trace);
+    // TODO: WE _MUST_ ALSO MOVE THINGS IN THE LIVE OBJECT TABLE
 }
 #endif
 
@@ -181,13 +188,24 @@ static VALUE collector_alloc(VALUE klass) {
 
     cd->newobj_trace = Qnil;
     cd->freeobj_trace = Qnil;
+    cd->creturn_trace = Qnil;
     cd->is_tracing = 0;
     cd->samples = NULL;
     cd->sample_count = 0;
     cd->live_objects = NULL;
     cd->string_tab = NULL;
+    cd->pending_size_count = 0;
     __atomic_store_n(&cd->u32_sample_rate, 0, __ATOMIC_SEQ_CST);
-    mpp_pthread_mutex_init(&cd->lock, 0);
+
+    // Initialize the mutex.
+    // It really does need to be recursive - if we call a rb_* function while holding
+    // the lock, that could trigger the GC to run and call our freeobj tracepoint,
+    // which _also_ needs the lock.
+    pthread_mutexattr_t mutex_attr;
+    mpp_pthread_mutexattr_init(&mutex_attr);
+    mpp_pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    mpp_pthread_mutex_init(&cd->lock, &mutex_attr);
+    mpp_pthread_mutexattr_destroy(&mutex_attr);
 
     return v;
 }
@@ -278,6 +296,7 @@ struct newobj_impl_args {
     struct mpp_rb_backtrace *bt;
     VALUE tpval;
     VALUE newobj;
+    size_t allocation_size;
 };
 
 // Collects all the parts of collector_tphook_newobj that could throw.
@@ -288,6 +307,7 @@ static VALUE collector_tphook_newobj_protected(VALUE args_as_uintptr) {
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
     args->newobj = rb_tracearg_object(tparg);
     mpp_rb_backtrace_capture(cd->loctab, &args->bt);
+    args->allocation_size = rb_obj_memsize_of(args->newobj);
     return Qnil;
 }
 
@@ -328,13 +348,14 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
         // and once because it's going in the heap profiling set.
         sample->refcount = 2;
         sample->bt = args.bt;
+        sample->allocation_size = args.allocation_size;
+        sample->allocated_value_weak = args.newobj;
 
         // Insert into allocation profiling list.
         // TODO: enforce a limit on how many things can go here.
         sample->next_alloc = cd->samples;
         cd->samples = sample;
-        // And into the heap profiling list.
-        st_insert(cd->live_objects, args.newobj, (st_data_t)sample);
+        cd->pending_size_count++;
     }
 
     mpp_pthread_mutex_unlock(&cd->lock);
@@ -354,8 +375,43 @@ static void collector_tphook_freeobj(VALUE tpval, void *data) {
 
     struct mpp_sample *sample;
     if (st_delete(cd->live_objects, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
+        // Clear out the reference to it
+        sample->allocated_value_weak = Qundef;
         // We deleted it out of live objects; decrement its refcount.
         internal_sample_decrement_refcount(cd, sample);
+    }
+
+    mpp_pthread_mutex_unlock(&cd->lock);
+}
+
+static VALUE collector_tphook_creturn_protected(VALUE cdataptr) {
+    struct collector_cdata *cd = (struct collector_cdata *)cdataptr;
+
+    struct mpp_sample *s = cd->samples;
+    for (int64_t i = 0; i < cd->pending_size_count; i++) {
+        MPP_ASSERT_MSG(s, "More pending size samples than samples in linked list??");
+        if (s->allocated_value_weak != Qundef) {
+            s->allocation_size = rb_obj_memsize_of(s->allocated_value_weak);
+        }
+        s = s->next_alloc;
+    }
+    return Qnil;
+}
+
+static void collector_tphook_creturn(VALUE tpval, void *data) {
+    struct collector_cdata *cd = (struct collector_cdata *)data;
+    int jump_tag = 0;
+    VALUE original_errinfo = rb_errinfo();
+    // If we can't get the lock this time round, we can just do it later.
+    if (mpp_pthread_mutex_trylock(&cd->lock) != 0) {
+        return;
+    }
+
+    rb_protect(collector_tphook_creturn_protected, (VALUE)cd, &jump_tag);
+    if (!jump_tag) {
+        cd->pending_size_count = 0;
+    } else {
+        rb_set_errinfo(original_errinfo);
     }
 
     mpp_pthread_mutex_unlock(&cd->lock);
@@ -374,8 +430,15 @@ static VALUE collector_start_protected(VALUE self) {
             0, RUBY_INTERNAL_EVENT_FREEOBJ, collector_tphook_freeobj, cd
         );
     }
+    if (cd->creturn_trace == Qnil) {
+        cd->creturn_trace = rb_tracepoint_new(
+            0, RUBY_EVENT_C_RETURN, collector_tphook_creturn, cd
+        );
+    }
+
     rb_tracepoint_enable(cd->newobj_trace);
     rb_tracepoint_enable(cd->freeobj_trace);
+    rb_tracepoint_enable(cd->creturn_trace);
     return Qnil;
 }
 
@@ -385,25 +448,23 @@ static VALUE collector_start(VALUE self) {
     mpp_pthread_mutex_lock(&cd->lock);
     if (cd->is_tracing) goto out;
 
-    // Do the things that might throw first.
-    rb_protect(collector_start_protected, self, &jump_tag);
-    if (jump_tag) goto out;
 
-    // Now it's safe to allocate our memory here without risk of it getting
-    // stranded. Note that the tracepoint we installed above cannot actually _run_
-    // until we release the lock below so it's perfectly safe to have the tracepoint
-    // installed right now.
     collector_cdata_gc_free_live_object_table(cd);
     collector_cdata_gc_decrement_sample_refcounts(cd);
     collector_cdata_gc_free_loctab(cd);
     collector_cdata_gc_free_strtab(cd);
 
+    // This stuff needs to be set up _before_ we enable the tracepoints.
     cd->samples = NULL;
     cd->sample_count = 0;
     cd->live_objects = st_init_numtable();
     cd->string_tab = mpp_strtab_new();
     cd->loctab = mpp_rb_loctab_new(cd->string_tab);
     cd->is_tracing = true;
+    cd->pending_size_count = 0;
+
+    // Now do the things that might throw
+    rb_protect(collector_start_protected, self, &jump_tag);
 
 out:
     mpp_pthread_mutex_unlock(&cd->lock);
@@ -417,6 +478,7 @@ static VALUE collector_stop_protected(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
     rb_tracepoint_disable(cd->newobj_trace);
     rb_tracepoint_disable(cd->freeobj_trace);
+    rb_tracepoint_disable(cd->creturn_trace);
     return Qnil;
 }
 
@@ -473,6 +535,8 @@ static VALUE collector_flush(VALUE self) {
 
     struct mpp_sample *sample_list = cd->samples;
     cd->samples = NULL;
+    cd->sample_count = 0;
+    cd->pending_size_count = 0;
 
     serctx = mpp_pprof_serctx_new();
     MPP_ASSERT_MSG(serctx, "mpp_pprof_serctx_new failed??");

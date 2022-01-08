@@ -39,8 +39,6 @@ void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
 
 struct mpp_pprof_serctx_add_location_ctx {
     struct mpp_pprof_serctx *ctx;
-    struct perftools_profiles_Location **location_proto_arr;
-    int64_t i;
     int is_error;
     char *errbuf;
     size_t errbuflen;
@@ -50,12 +48,7 @@ static int mpp_pprof_serctx_add_location(
     struct mpp_rb_loctab *loctab, struct mpp_rb_loctab_location *location, void *ctx
 ) {
     struct mpp_pprof_serctx_add_location_ctx *thunkctx = ctx;
-    MPP_ASSERT_MSG(thunkctx->i < thunkctx->ctx->loctab->location_count, "location_count was too small?");
-
-//    struct perftools_profiles_Location *loc_proto = perftools_profiles_Location_new(thunkctx->ctx->arena);
     struct perftools_profiles_Location *loc_proto = perftools_profiles_Profile_add_location(thunkctx->ctx->profile_proto, thunkctx->ctx->arena);
-//    thunkctx->location_proto_arr[thunkctx->i] = loc_proto;
-    thunkctx->i++;
 
 
     perftools_profiles_Location_set_id(loc_proto, location->id);
@@ -68,8 +61,6 @@ static int mpp_pprof_serctx_add_location(
 
 struct mpp_pprof_serctx_add_function_ctx {
     struct mpp_pprof_serctx *ctx;
-    struct perftools_profiles_Function **fn_proto_arr;
-    int64_t i;
     int is_error;
     char *errbuf;
     size_t errbuflen;
@@ -79,12 +70,7 @@ static int mpp_pprof_serctx_add_function(
     struct mpp_rb_loctab *loctab, struct mpp_rb_loctab_function *function, void *ctx
 ) {
     struct mpp_pprof_serctx_add_function_ctx *thunkctx = ctx;
-    MPP_ASSERT_MSG(thunkctx->i < thunkctx->ctx->loctab->function_count, "function_count was too small?");
-
-//    struct perftools_profiles_Function *fn_proto = perftools_profiles_Function_new(thunkctx->ctx->arena);
     struct perftools_profiles_Function *fn_proto = perftools_profiles_Profile_add_function(thunkctx->ctx->profile_proto, thunkctx->ctx->arena);
-//    thunkctx->fn_proto_arr[thunkctx->i] = fn_proto;
-    thunkctx->i++;
 
     perftools_profiles_Function_set_id(fn_proto, function->id);
 
@@ -123,10 +109,10 @@ int mpp_pprof_serctx_set_loctab(
     ctx->loctab = loctab;
 
     // Intern some strings we'll need to produce our output
-    mpp_strtab_intern(
-        loctab->strtab, "allocations", MPP_STRTAB_USE_STRLEN, &ctx->internstr_allocations, NULL
-    );
-    mpp_strtab_intern(loctab->strtab, "count", MPP_STRTAB_USE_STRLEN, &ctx->internstr_count, NULL);
+    mpp_strtab_intern_cstr(loctab->strtab, "allocations", &ctx->internstr_allocations, NULL);
+    mpp_strtab_intern_cstr(loctab->strtab, "count", &ctx->internstr_count, NULL);
+    mpp_strtab_intern_cstr(loctab->strtab, "size", &ctx->internstr_size, NULL);
+    mpp_strtab_intern_cstr(loctab->strtab, "bytes", &ctx->internstr_bytes, NULL);
 
     ctx->strindex = mpp_strtab_index(loctab->strtab);
     MPP_ASSERT_MSG(ctx->strindex, "mpp_strtab_index returned 0");
@@ -142,9 +128,11 @@ int mpp_pprof_serctx_set_loctab(
     }
 
     // Set up the sample types etc.
-    perftools_profiles_ValueType *vt =
+    perftools_profiles_ValueType *allocations_vt =
         perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
-#define VT_SET_STRINTERN_FIELD(field, str)                                                                  \
+    perftools_profiles_ValueType *size_vt =
+        perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
+#define VT_SET_STRINTERN_FIELD(vt, field, str)                                                              \
     do {                                                                                                    \
         int64_t interned = mpp_strtab_index_of(ctx->strindex, (str));                                       \
         if (interned == -1) {                                                                               \
@@ -154,16 +142,14 @@ int mpp_pprof_serctx_set_loctab(
         perftools_profiles_ValueType_set_##field(vt, interned);                                             \
     } while (0)
 
-    VT_SET_STRINTERN_FIELD(type, ctx->internstr_allocations);
-    VT_SET_STRINTERN_FIELD(unit, ctx->internstr_count);
+    VT_SET_STRINTERN_FIELD(allocations_vt, type, ctx->internstr_allocations);
+    VT_SET_STRINTERN_FIELD(allocations_vt, unit, ctx->internstr_count);
+    VT_SET_STRINTERN_FIELD(size_vt, type, ctx->internstr_size);
+    VT_SET_STRINTERN_FIELD(size_vt, unit, ctx->internstr_bytes);
 #undef VT_SET_STRINTERN_FIELD
 
     // Set up the location array.
-//    struct perftools_profiles_Location **locations_proto =
-//        perftools_profiles_Profile_resize_location(ctx->profile_proto, loctab->location_count, ctx->arena);
     struct mpp_pprof_serctx_add_location_ctx loc_add_ctx;
-    loc_add_ctx.i = 0;
-//    loc_add_ctx.location_proto_arr = locations_proto;
     loc_add_ctx.ctx = ctx;
     loc_add_ctx.errbuf = errbuf;
     loc_add_ctx.errbuflen = errbuflen;
@@ -174,11 +160,7 @@ int mpp_pprof_serctx_set_loctab(
     }
 
     // And the same for functions pretty much
-//    struct perftools_profiles_Function **functions_proto =
-//        perftools_profiles_Profile_resize_function(ctx->profile_proto, loctab->location_count, ctx->arena);
     struct mpp_pprof_serctx_add_function_ctx fn_add_ctx;
-    fn_add_ctx.i = 0;
-//    fn_add_ctx.fn_proto_arr = functions_proto;
     fn_add_ctx.ctx = ctx;
     fn_add_ctx.errbuf = errbuf;
     fn_add_ctx.errbuflen = errbuflen;
@@ -204,8 +186,11 @@ int mpp_pprof_serctx_add_sample(
         location_ids[i] = sample->bt->frame_locations[sample->bt->frames_count - i - 1];
     }
 
-    // TODO: values & labels
+    // First sample is 1, for "allocation count"
     perftools_profiles_Sample_add_value(sample_proto, 1, ctx->arena);
+    // Second sample is the size of the allocation
+    perftools_profiles_Sample_add_value(sample_proto, (int64_t)sample->allocation_size, ctx->arena);
+
     return 0;
 }
 

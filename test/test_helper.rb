@@ -78,3 +78,17 @@ end
 def total_allocations(pprof)
   pprof.sample.size
 end
+
+def allocation_size_sum_under(pprof, fn_name)
+  fn_map = pprof.function.to_h { |fn| [fn.id, fn] }
+  loc_map = pprof.location.to_h { |loc| [loc.id, loc] }
+
+  pprof.sample.reduce(0) do |acc, sample|
+    next acc unless sample.location_id.any? do |loc_id|
+      fn = fn_map[loc_map[loc_id].line[0].function_id]
+      pprof.string_table[fn.name] == fn_name
+    end
+
+    acc + sample.value[1]
+  end
+end

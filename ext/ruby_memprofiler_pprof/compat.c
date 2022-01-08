@@ -108,6 +108,24 @@ void mpp_pthread_mutex_destroy(pthread_mutex_t *m) {
     }
 }
 
+void mpp_pthread_mutexattr_init(pthread_mutexattr_t *a) {
+    if (pthread_mutexattr_init(a) != 0) {
+        MPP_ASSERT_FAIL("failed to init pthread_mutexattr in ruby_memprofiler_pprof gem");
+    }
+}
+
+void mpp_pthread_mutexattr_destroy(pthread_mutexattr_t *a) {
+    if (pthread_mutexattr_destroy(a) != 0) {
+        MPP_ASSERT_FAIL("failed to destroy pthread_mutexattr in ruby_memprofiler_pprof gem");
+    }
+}
+
+void mpp_pthread_mutexattr_settype(pthread_mutexattr_t *a, int type) {
+    if (pthread_mutexattr_settype(a, type) != 0) {
+        MPP_ASSERT_FAIL("failed to set type on pthread_mutexattr in ruby_memprofiler_pprof gem");
+    }
+}
+
 
 __attribute__ ((noreturn))
 void mpp_assert_fail(

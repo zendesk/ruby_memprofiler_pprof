@@ -53,6 +53,9 @@ void mpp_pthread_mutex_unlock(pthread_mutex_t *m);
 int mpp_pthread_mutex_trylock(pthread_mutex_t *m);
 void mpp_pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *attr);
 void mpp_pthread_mutex_destroy(pthread_mutex_t *m);
+void mpp_pthread_mutexattr_init(pthread_mutexattr_t *a);
+void mpp_pthread_mutexattr_destroy(pthread_mutexattr_t *a);
+void mpp_pthread_mutexattr_settype(pthread_mutexattr_t *a, int type);
 
 // Need a handy assertion macro. It would be nice to re-use rb_bug for some of this, but that actually
 // requires the GVL (it walks the Ruby stack frames, for one) and we (want to) run some code outside
@@ -230,6 +233,10 @@ struct mpp_sample {
     struct mpp_rb_backtrace *bt;
     // Sample has a refcount - because it's used both in the heap profiling and in the allocation profiling.
     int64_t refcount;
+    // How big this allocation was.
+    size_t allocation_size;
+    // Weak reference to what was allocated. Validate that it's alive by consulting the live object table first.
+    VALUE allocated_value_weak;
     // Next element in the allocation profiling sample list. DO NOT use this in the heap profiling table.
     struct mpp_sample *next_alloc;
 };
@@ -254,6 +261,8 @@ struct mpp_pprof_serctx {
     // (the pprof format requires these strings to be in the string table along with the rest of them)
     const char *internstr_allocations;
     const char *internstr_count;
+    const char *internstr_size;
+    const char *internstr_bytes;
 };
 
 struct mpp_pprof_serctx *mpp_pprof_serctx_new();
