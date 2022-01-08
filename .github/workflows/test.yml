@@ -11,7 +11,7 @@ jobs:
           - '2.6'
           - '2.7'
           - '3.0'
-          # - '3.1' Can't test on 3.1 yet, because google-protobuf does not support it.
+          - '3.1'
     steps:
       - uses: zendesk/checkout@v2
       - uses: zendesk/setup-ruby@v1
