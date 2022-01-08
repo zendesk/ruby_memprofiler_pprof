@@ -150,15 +150,27 @@ static size_t collector_cdata_memsize(const void *ptr) {
     return sz;
 }
 
-
 #ifdef HAVE_RB_GC_MARK_MOVABLE
 // Support VALUES we're tracking being moved away in Ruby 2.7+ with GC.compact
+static int collector_move_each_live_object(st_data_t key, st_data_t value, st_data_t arg) {
+    struct collector_cdata *cd = (struct collector_cdata *)arg;
+    struct mpp_sample *sample = (struct mpp_sample *)value;
+
+    if (rb_gc_location(sample->allocated_value_weak) == sample->allocated_value_weak) {
+        return ST_CONTINUE;
+    } else {
+        sample->allocated_value_weak = rb_gc_location(sample->allocated_value_weak);
+        st_insert(cd->live_objects, sample->allocated_value_weak, (st_data_t)sample);
+        return ST_DELETE;
+    }
+}
+
 static void collector_cdata_gc_compact(void *ptr) {
     struct collector_cdata *cd = (struct collector_cdata *)ptr;
     cd->newobj_trace = rb_gc_location(cd->newobj_trace);
     cd->freeobj_trace = rb_gc_location(cd->freeobj_trace);
     cd->creturn_trace = rb_gc_location(cd->creturn_trace);
-    // TODO: WE _MUST_ ALSO MOVE THINGS IN THE LIVE OBJECT TABLE
+    st_foreach(cd->live_objects, collector_move_each_live_object, (st_data_t)cd);
 }
 #endif
 
@@ -356,6 +368,9 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
         sample->next_alloc = cd->samples;
         cd->samples = sample;
         cd->pending_size_count++;
+
+        // Also insert into live object list
+        st_insert(cd->live_objects, args.newobj, (st_data_t)sample);
     }
 
     mpp_pthread_mutex_unlock(&cd->lock);
@@ -589,6 +604,22 @@ out:
     RB_GC_GUARD(self);
 }
 
+static int collector_st_count(st_data_t key, st_data_t value, st_data_t arg) {
+    int64_t *counter = (int64_t *)arg;
+    (*counter)++;
+    return ST_CONTINUE;
+}
+
+static VALUE collector_live_object_count(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+
+    mpp_pthread_mutex_lock(&cd->lock);
+    int64_t counter = 0;
+    st_foreach(cd->live_objects, collector_st_count, (st_data_t)&counter);
+    mpp_pthread_mutex_unlock(&cd->lock);
+    return LONG2NUM(counter);
+}
+
 void mpp_setup_collector_class() {
     cCollector = rb_define_class_under(mMemprofilerPprof, "Collector", rb_cObject);
     rb_define_alloc_func(cCollector, collector_alloc);
@@ -602,4 +633,5 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "start!", collector_start, 0);
     rb_define_method(cCollector, "stop!", collector_stop, 0);
     rb_define_method(cCollector, "flush", collector_flush, 0);
+    rb_define_method(cCollector, "live_object_count", collector_live_object_count, 0);
 }

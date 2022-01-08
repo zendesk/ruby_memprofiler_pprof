@@ -70,7 +70,41 @@ describe MemprofilerPprof::Collector do
 
     assert_operator big_bytes, :>=, 50000
     assert_operator medium_bytes, :>=,  5000
-    assert_operator medium_bytes, :<, 10000
+    assert_operator medium_bytes, :<, 20000
+  end
+
+  it 'handles compaction' do
+    skip "Compaction requires Ruby 2.7+" unless ::GC.respond_to?(:compact)
+
+    def big_array_compacting_method
+      the_array = Array.new(20000)
+      20000.times do |i|
+        the_array[i] = SecureRandom.hex(10)
+        if i > 10 && i % 3 == 0
+          the_array[i - 10] = nil
+        end
+      end
+      the_array
+    end
+
+    # If we're not handling compaction correctly, this will segfault because we won't notice
+    # that all the elements of the_array got moved.
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
+    c.start!
+    proc {
+      keep_live = big_array_compacting_method
+      2.times { GC.compact }
+      keep_live.slice!(1, keep_live.size - 1)
+      GC.stress = true
+      100.times { GC.start(full_mark: true, immediate_sweep: true) }
+      GC.stress = false
+      2.times { GC.compact }
+    }.call
+
+    ct = c.live_object_count
+    c.stop!
+
+    assert_operator ct, :<, 100
   end
 
   it 'captures allocations in multiple ractors' do
