@@ -71,7 +71,7 @@ end
 def stack_contains?(stack, segment)
   return false if segment.size > stack.size
   (0..(stack.size - segment.size)).any? do |i|
-    segment.reverse == stack[i...segment.size]
+    segment.reverse == stack[i...(i + segment.size)]
   end
 end
 
