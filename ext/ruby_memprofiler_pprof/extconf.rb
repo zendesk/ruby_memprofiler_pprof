@@ -34,8 +34,11 @@ raise "Zlib headers & library are required!" unless has_zlib_headers && has_zlib
 # Peek into internal Ruby headers
 require 'debase/ruby_core_source'
 internal_headers = proc {
-  have_header("vm_core.h") and have_header("iseq.h") and have_header("version.h")
+  have_header("vm_core.h") and
+    have_header("iseq.h", ["vm_core.h"]) and
+    have_header("version.h")
 }
+
 
 
 dir_config('ruby')

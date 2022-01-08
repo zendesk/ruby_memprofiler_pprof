@@ -44,8 +44,6 @@ describe MemprofilerPprof::Collector do
     profiled_allocations = total_allocations pprof
     gc_stat_allocations = objs_stop - objs_start
 
-    # We put the GC.stat calls inside the profiling calls, so the profiling must be >= the stat values.
-    assert_operator profiled_allocations, :>=, gc_stat_allocations
     assert_in_delta(gc_stat_allocations, profiled_allocations, 3)
   end
 
