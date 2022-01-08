@@ -48,4 +48,46 @@ describe MemprofilerPprof::Collector do
     assert_operator profiled_allocations, :>=, gc_stat_allocations
     assert_in_delta(gc_stat_allocations, profiled_allocations, 3)
   end
+
+  it 'captures allocations in multiple ractors' do
+    skip "Ractors can't work with newobj tracepoints: https://bugs.ruby-lang.org/issues/18464"
+    skip "Ractors not available in Ruby #{RUBY_VERSION}" unless defined?(::Ractor)
+
+    def ractor1_method
+      SecureRandom.hex 50
+    end
+
+    def ractor2_method
+      SecureRandom.hex 50
+    end
+
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
+    c.start!
+    r1 = Ractor.new do
+      1000.times do
+        Ractor.yield ractor1_method
+      end
+    end
+    r2 = Ractor.new do
+      1000.times do
+        Ractor.yield ractor2_method
+      end
+    end
+
+    loop do
+      Ractor.select(r1, r2)
+    end
+
+    profile_bytes = c.flush
+    c.stop!
+
+    pprof = decode_pprof(profile_bytes)
+    allocating_stacks = allocation_function_backtraces pprof
+
+    ractor1_stacks = allocating_stacks.select { |s| stack_contains? s, ['ractor1_method'] }
+    ractor2_stacks = allocating_stacks.select { |s| stack_contains? s, ['ractor2_method'] }
+
+    assert_operator ractor1_stacks, :>, 0
+    assert_operator ractor2_stacks, :>, 0
+  end
 end
