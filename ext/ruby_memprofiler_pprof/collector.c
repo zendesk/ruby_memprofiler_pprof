@@ -728,6 +728,17 @@ out:
     RB_GC_GUARD(self);
 }
 
+static VALUE collector_profile(VALUE self) {
+    rb_need_block();
+
+    rb_funcall(self, rb_intern("start!"), 0);
+    rb_yield_values(0);
+    VALUE profile_output = rb_funcall(self, rb_intern("flush"), 0);
+    rb_funcall(self, rb_intern("stop!"), 0);
+
+    return profile_output;
+}
+
 static VALUE collector_live_heap_samples_count(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
 
@@ -752,6 +763,7 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "start!", collector_start, 0);
     rb_define_method(cCollector, "stop!", collector_stop, 0);
     rb_define_method(cCollector, "flush", collector_flush, 0);
+    rb_define_method(cCollector, "profile", collector_profile, 0);
     rb_define_method(cCollector, "live_heap_samples_count", collector_live_heap_samples_count, 0);
 
     cProfileData = rb_struct_define_under(

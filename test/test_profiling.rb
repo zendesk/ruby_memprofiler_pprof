@@ -3,16 +3,12 @@ require_relative 'test_helper'
 describe MemprofilerPprof::Collector do
   it 'captures backtraces for memory allocations' do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-    c.start!
-    xx = dummy_fn1
-    profile_bytes = c.flush.pprof_data
-    c.stop!
-
-    # Make sure stuff did actually get allocated
-    assert_equal 4096, xx.size
+    profile_data = c.profile do
+      xx = dummy_fn1
+    end
 
     # Decode the sample backtraces
-    pprof = decode_pprof(profile_bytes)
+    pprof = decode_pprof(profile_data.pprof_data)
     allocating_stacks = allocation_function_backtraces pprof
 
     fn2_stacks = allocating_stacks.select { |s| stack_contains? s, %w[dummy_fn1 dummy_fn2] }
@@ -33,14 +29,15 @@ describe MemprofilerPprof::Collector do
     # Warm up the symbol intern cache inside GC.stat
     GC.stat(:total_allocated_objects)
 
-    c.start!
-    objs_start = GC.stat(:total_allocated_objects)
-    dummy_fn1
-    objs_stop = GC.stat(:total_allocated_objects)
-    profile_bytes = c.flush.pprof_data
-    c.stop!
+    objs_start = nil
+    objs_stop = nil
+    profile_data = c.profile do
+      objs_start = GC.stat(:total_allocated_objects)
+      dummy_fn1
+      objs_stop = GC.stat(:total_allocated_objects)
+    end
 
-    pprof = decode_pprof(profile_bytes)
+    pprof = decode_pprof(profile_data.pprof_data)
     profiled_allocations = total_allocations pprof
     gc_stat_allocations = objs_stop - objs_start
 
@@ -57,14 +54,12 @@ describe MemprofilerPprof::Collector do
     end
 
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
+    profile_data = c.profile do
+      big_allocation_func
+      medium_allocation_func
+    end
 
-    c.start!
-    big_allocation_func
-    medium_allocation_func
-    profile_bytes = c.flush.pprof_data
-    c.stop!
-
-    pprof = decode_pprof(profile_bytes)
+    pprof = decode_pprof(profile_data.pprof_data)
     big_bytes = allocation_size_sum_under(pprof, 'big_allocation_func')
     medium_bytes = allocation_size_sum_under(pprof, 'medium_allocation_func')
 
@@ -90,8 +85,8 @@ describe MemprofilerPprof::Collector do
     # If we're not handling compaction correctly, this will segfault because we won't notice
     # that all the elements of the_array got moved.
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-    c.start!
-    proc {
+    ct = nil
+    c.profile do
       keep_live = big_array_compacting_method
       2.times { GC.compact }
       keep_live.slice!(1, keep_live.size - 1)
@@ -99,10 +94,8 @@ describe MemprofilerPprof::Collector do
       100.times { GC.start(full_mark: true, immediate_sweep: true) }
       GC.stress = false
       2.times { GC.compact }
-    }.call
-
-    ct = c.live_heap_samples_count
-    c.stop!
+      ct = c.live_heap_samples_count
+    end
 
     assert_operator ct, :<, 100
   end
@@ -120,26 +113,24 @@ describe MemprofilerPprof::Collector do
     end
 
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-    c.start!
-    r1 = Ractor.new do
-      1000.times do
-        Ractor.yield ractor1_method
+    profile_data = c.profile do
+      r1 = Ractor.new do
+        1000.times do
+          Ractor.yield ractor1_method
+        end
+      end
+      r2 = Ractor.new do
+        1000.times do
+          Ractor.yield ractor2_method
+        end
+      end
+
+      loop do
+        Ractor.select(r1, r2)
       end
     end
-    r2 = Ractor.new do
-      1000.times do
-        Ractor.yield ractor2_method
-      end
-    end
 
-    loop do
-      Ractor.select(r1, r2)
-    end
-
-    profile_bytes = c.flush.pprof_data
-    c.stop!
-
-    pprof = decode_pprof(profile_bytes)
+    pprof = decode_pprof(profile_data.pprof_data)
     allocating_stacks = allocation_function_backtraces pprof
 
     ractor1_stacks = allocating_stacks.select { |s| stack_contains? s, ['ractor1_method'] }
@@ -151,10 +142,9 @@ describe MemprofilerPprof::Collector do
 
   it 'respects max samples' do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0, max_allocation_samples: 20)
-    c.start!
-    100.times { SecureRandom.hex 50 }
-    profile_data = c.flush
-    c.stop!
+    profile_data = c.profile do
+      100.times { SecureRandom.hex 50 }
+    end
 
     assert_equal 20, profile_data.allocation_samples_count
     assert_operator profile_data.dropped_samples_allocation_bufsize, :>=, 80
