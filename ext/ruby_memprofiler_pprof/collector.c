@@ -388,6 +388,17 @@ static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval) {
     return newval;
 }
 
+static void collector_mark_sample_as_freed(struct collector_cdata *cd, VALUE freed_obj) {
+    struct mpp_sample *sample;
+    if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
+        // Clear out the reference to it
+        sample->allocated_value_weak = Qundef;
+        // We deleted it out of live objects; decrement its refcount.
+        internal_sample_decrement_refcount(cd, sample);
+        cd->heap_samples_count--;
+    }
+}
+
 struct newobj_impl_args {
     struct collector_cdata *cd;
     struct mpp_rb_backtrace *bt;
@@ -460,7 +471,17 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
         goto out;
     }
 
-    // No error was thrown, add it to our sample buffers.
+    // This is also super-unlikely, but it _is_ possible that there might _already_ be an entry for
+    // this VALUE in our heap_samples buffer; this is because for some kinds of internal objects
+    // under some circumstances, Ruby frees them directly (by setting RVALUE->flags to 0) without
+    // actually waiting for them to be GC'd (and thus, without having the GC free hook invoked). Then,
+    // this VALUE could be re-used for a new object.
+    // We detect that by seeing if this VALUE is re-using a VALUE we already have; in that case, consider
+    // the previous sample to be freed.
+    collector_mark_sample_as_freed(cd, args.newobj);
+
+
+    // OK, now it's time to add to our sample buffers.
     struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
     // Set the sample refcount to two. Once because it's going in the allocation sampling buffer,
     // and once because it's going in the heap profiling set.
@@ -489,17 +510,6 @@ out:
     if (jump_tag && original_errinfo != Qundef) rb_set_errinfo(original_errinfo);
 
     mpp_pthread_mutex_unlock(&cd->lock);
-}
-
-static void collector_mark_sample_as_freed(struct collector_cdata *cd, VALUE freed_obj) {
-    struct mpp_sample *sample;
-    if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
-        // Clear out the reference to it
-        sample->allocated_value_weak = Qundef;
-        // We deleted it out of live objects; decrement its refcount.
-        internal_sample_decrement_refcount(cd, sample);
-        cd->heap_samples_count--;
-    }
 }
 
 static void collector_tphook_freeobj(VALUE tpval, void *data) {
