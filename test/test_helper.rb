@@ -6,89 +6,70 @@ require 'securerandom'
 require 'zlib'
 
 # Some dummy functions that call each other
-def dummy_fn1
-  $dummy_fn_state = 0
-  dummy_fn2
-end
+class DecodedProfileData
+  class Sample
+    attr_accessor :backtrace, :line_backtrace, :allocations, :allocation_size
 
-def dummy_fn2
-  v1 = "a" * 1024
-  v1 + dummy_fn3 + dummy_fn4
-end
-
-def dummy_fn3
-  SecureRandom.hex(512) + dummy_fn4
-end
-
-def dummy_fn4
-  # dummy_fn4 is called twice; make sure it returns a different result both times, otherwise
-  # the string we allocated gets interned and it only allocates once.
-  $dummy_fn_state += 1
-  case $dummy_fn_state
-  when 1
-    return 'z' * 1024
-  when 2
-    return 'y' * 1024
-  end
-end
-
-def decode_pprof(pprof_bytes)
-  Perftools::Profiles::Profile.decode Zlib.gunzip(pprof_bytes)
-end
-
-def allocation_function_backtraces(pprof)
-  fn_map = pprof.function.to_h { |fn| [fn.id, fn] }
-  loc_map = pprof.location.to_h { |loc| [loc.id, loc] }
-
-  pprof.sample.map do |sample|
-    sample.location_id.map do |loc_id|
-      fn = fn_map[loc_map[loc_id].line[0].function_id]
-      pprof.string_table[fn.name]
+    def backtrace_contains?(stack_segment)
+      return false if stack_segment.size > backtrace.size
+      (0..(backtrace.size - stack_segment.size)).any? do |i|
+        stack_segment.reverse == backtrace[i...(i + stack_segment.size)]
+      end
     end
   end
-end
 
-def allocation_full_backtraces(pprof)
-  fn_map = pprof.function.to_h { |fn| [fn.id, fn] }
-  loc_map = pprof.location.to_h { |loc| [loc.id, loc] }
+  attr_reader :samples
 
-  pprof.sample.map do |sample|
-    sample.location_id.map do |loc_id|
-      fn = fn_map[loc_map[loc_id].line[0].function_id]
-      fn_name = pprof.string_table[fn.name]
-      filename = pprof.string_table[fn.filename]
-      line_no = loc_map[loc_id].line[0].line
-      "#{filename}:#{line_no} in #{fn_name}"
+  def initialize(profile_data)
+    @profile_data = profile_data
+    @pprof = Perftools::Profiles::Profile.decode Zlib.gunzip(@profile_data.pprof_data)
+
+    @fn_map = @pprof.function.to_h { |fn| [fn.id, fn] }
+    @loc_map = @pprof.location.to_h { |loc| [loc.id, loc] }
+
+    @samples = @pprof.sample.map do |sample_proto|
+      s = Sample.new
+      s.line_backtrace = []
+      s.backtrace = []
+      sample_proto.location_id.map do |loc_id|
+        fn = @fn_map[@loc_map[loc_id].line[0].function_id]
+        fn_name = @pprof.string_table[fn.name]
+        filename = @pprof.string_table[fn.filename]
+        line_no = @loc_map[loc_id].line[0].line
+
+        s.backtrace << fn_name
+        s.line_backtrace << "#{filename}:#{line_no} in #{fn_name}"
+      end
+      s.allocations = sample_proto.value[0]
+      s.allocation_size = sample_proto.value[1]
+      s
     end
   end
-end
 
-def stack_ends_with?(stack, segment)
-  return false if segment.size > stack.size
-  segment.reverse == stack[0...segment.size]
-end
-
-def stack_contains?(stack, segment)
-  return false if segment.size > stack.size
-  (0..(stack.size - segment.size)).any? do |i|
-    segment.reverse == stack[i...(i + segment.size)]
+  def total_allocations
+    @samples.reduce(0) { |acc, s| acc += s.allocations }
   end
-end
 
-def total_allocations(pprof)
-  pprof.sample.size
-end
-
-def allocation_size_sum_under(pprof, fn_name)
-  fn_map = pprof.function.to_h { |fn| [fn.id, fn] }
-  loc_map = pprof.location.to_h { |loc| [loc.id, loc] }
-
-  pprof.sample.reduce(0) do |acc, sample|
-    next acc unless sample.location_id.any? do |loc_id|
-      fn = fn_map[loc_map[loc_id].line[0].function_id]
-      pprof.string_table[fn.name] == fn_name
+  def total_allocation_size(under: nil)
+    @samples.reduce(0) do |acc, s|
+      if under
+        next acc unless s.backtrace_contains? [under]
+      end
+      acc += s.allocation_size
     end
+  end
 
-    acc + sample.value[1]
+  def samples_including_stack(stack_segment)
+    @samples.select { |s| s.backtrace_contains? stack_segment }
+  end
+
+  if Gem::Version.new(RUBY_VERSION) < Gem::Version.new("2.7")
+    def method_missing(m, *args, &blk)
+      @profile_data.send(m, *args, **kwargs, &blk)
+    end
+  else
+    def method_missing(m, *args, **kwargs, &blk)
+      @profile_data.send(m, *args, **kwargs, &blk)
+    end
   end
 end

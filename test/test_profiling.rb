@@ -2,18 +2,33 @@ require_relative 'test_helper'
 
 describe MemprofilerPprof::Collector do
   it 'captures backtraces for memory allocations' do
+    def dummy_fn1
+      dummy_fn2
+    end
+
+    def dummy_fn2
+      v1 = "a" * 1024
+      v1 + dummy_fn3 + dummy_fn4
+    end
+
+    def dummy_fn3
+      SecureRandom.hex(512) + dummy_fn4
+    end
+
+    def dummy_fn4
+      'z' * 1024
+    end
+
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
     profile_data = c.profile do
       xx = dummy_fn1
     end
 
     # Decode the sample backtraces
-    pprof = decode_pprof(profile_data.pprof_data)
-    allocating_stacks = allocation_function_backtraces pprof
-
-    fn2_stacks = allocating_stacks.select { |s| stack_contains? s, %w[dummy_fn1 dummy_fn2] }
-    fn3_stacks = allocating_stacks.select { |s| stack_contains? s, %w[dummy_fn1 dummy_fn2 dummy_fn3] }
-    fn4_stacks = allocating_stacks.select { |s| stack_contains? s, %w[dummy_fn1 dummy_fn2 dummy_fn3 dummy_fn4] }
+    pprof = DecodedProfileData.new(profile_data)
+    fn2_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2]
+    fn3_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3]
+    fn4_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3 dummy_fn4]
 
     # It's basically impossible to know how many allocations these things are doing; a lot of the allocations
     # actually come from (cfunc)'s underneath these functions too (e.g. "*"). Just assert that we got some
@@ -33,15 +48,14 @@ describe MemprofilerPprof::Collector do
     objs_stop = nil
     profile_data = c.profile do
       objs_start = GC.stat(:total_allocated_objects)
-      dummy_fn1
+      100.times { SecureRandom.hex 50 }
       objs_stop = GC.stat(:total_allocated_objects)
     end
 
-    pprof = decode_pprof(profile_data.pprof_data)
-    profiled_allocations = total_allocations pprof
+    pprof = DecodedProfileData.new(profile_data)
     gc_stat_allocations = objs_stop - objs_start
 
-    assert_in_delta(gc_stat_allocations, profiled_allocations, 3)
+    assert_in_delta(gc_stat_allocations, pprof.total_allocations, 3)
   end
 
   it 'captures allocation sizes' do
@@ -59,9 +73,9 @@ describe MemprofilerPprof::Collector do
       medium_allocation_func
     end
 
-    pprof = decode_pprof(profile_data.pprof_data)
-    big_bytes = allocation_size_sum_under(pprof, 'big_allocation_func')
-    medium_bytes = allocation_size_sum_under(pprof, 'medium_allocation_func')
+    pprof = DecodedProfileData.new(profile_data)
+    big_bytes = pprof.total_allocation_size under: 'big_allocation_func'
+    medium_bytes = pprof.total_allocation_size under: 'medium_allocation_func'
 
     assert_operator big_bytes, :>=, 50000
     assert_operator medium_bytes, :>=,  5000
@@ -130,11 +144,9 @@ describe MemprofilerPprof::Collector do
       end
     end
 
-    pprof = decode_pprof(profile_data.pprof_data)
-    allocating_stacks = allocation_function_backtraces pprof
-
-    ractor1_stacks = allocating_stacks.select { |s| stack_contains? s, ['ractor1_method'] }
-    ractor2_stacks = allocating_stacks.select { |s| stack_contains? s, ['ractor2_method'] }
+    pprof = DecodedProfileData.new(profile_data)
+    ractor1_stacks = pprof.samples_including_stack ['ractor1_method']
+    ractor2_stacks = pprof.samples_including_stack ['ractor2_method']
 
     assert_operator ractor1_stacks, :>, 0
     assert_operator ractor2_stacks, :>, 0
@@ -146,11 +158,9 @@ describe MemprofilerPprof::Collector do
       100.times { SecureRandom.hex 50 }
     end
 
-    assert_equal 20, profile_data.allocation_samples_count
-    assert_operator profile_data.dropped_samples_allocation_bufsize, :>=, 80
-
-    pprof = decode_pprof(profile_data.pprof_data)
-    allocating_stacks = allocation_function_backtraces pprof
-    assert_equal 20, allocating_stacks.size
+    pprof = DecodedProfileData.new(profile_data)
+    assert_equal 20, pprof.allocation_samples_count
+    assert_operator pprof.dropped_samples_allocation_bufsize, :>=, 80
+    assert_equal 20, pprof.samples.size
   end
 end
