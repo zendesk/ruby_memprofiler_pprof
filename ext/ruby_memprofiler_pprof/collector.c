@@ -683,12 +683,20 @@ static VALUE collector_rotate_profile_cimpl_prepresult(VALUE vargs) {
         (struct collector_rotate_profile_cimpl_prepresult_args *)vargs;
 
     VALUE pprof_data = rb_str_new(args->pprofbuf, args->pprofbuf_len);
-    return rb_struct_new(
-        cProfileData, pprof_data,
-        LONG2NUM(args->allocation_samples_count), LONG2NUM(args->heap_samples_count),
-        LONG2NUM(args->dropped_samples_nolock), LONG2NUM(args->dropped_samples_allocation_bufsize),
-        LONG2NUM(args->dropped_samples_heap_bufsize)
+    VALUE profile_data = rb_class_new_instance(0, NULL, cProfileData);
+    rb_funcall(profile_data, rb_intern("pprof_data="), 1, pprof_data);
+    rb_funcall(profile_data, rb_intern("allocation_samples_count="), 1, LONG2NUM(args->allocation_samples_count));
+    rb_funcall(profile_data, rb_intern("heap_samples_count="), 1, LONG2NUM(args->heap_samples_count));
+    rb_funcall(profile_data, rb_intern("dropped_samples_nolock="), 1, LONG2NUM(args->dropped_samples_nolock));
+    rb_funcall(
+        profile_data, rb_intern("dropped_samples_allocation_bufsize="),
+        1, LONG2NUM(args->dropped_samples_allocation_bufsize)
     );
+    rb_funcall(
+        profile_data, rb_intern("dropped_samples_heap_bufsize="),
+        1, LONG2NUM(args->dropped_samples_heap_bufsize)
+    );
+    return profile_data;
 }
 
 static VALUE collector_flush(VALUE self) {
@@ -790,6 +798,7 @@ static VALUE collector_live_heap_samples_count(VALUE self) {
 }
 
 void mpp_setup_collector_class() {
+    cProfileData = rb_const_get(mMemprofilerPprof, rb_intern("ProfileData"));
     cCollector = rb_define_class_under(mMemprofilerPprof, "Collector", rb_cObject);
     rb_define_alloc_func(cCollector, collector_alloc);
 
@@ -806,10 +815,4 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "flush", collector_flush, 0);
     rb_define_method(cCollector, "profile", collector_profile, 0);
     rb_define_method(cCollector, "live_heap_samples_count", collector_live_heap_samples_count, 0);
-
-    cProfileData = rb_struct_define_under(
-        mMemprofilerPprof, "ProfileData",
-        "pprof_data", "allocation_samples_count", "heap_samples_count",
-        "dropped_samples_nolock", "dropped_samples_allocation_bufsize", "dropped_samples_heap_bufsize", 0
-    );
 }
