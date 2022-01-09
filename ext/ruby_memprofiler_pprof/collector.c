@@ -109,10 +109,8 @@ static void internal_sample_list_decrement_refcount(struct collector_cdata *cd, 
     }
 }
 
-static void collector_cdata_gc_free_allocation_samples(
-    struct collector_cdata *cd, struct mpp_sample *allocation_samples
-) {
-    internal_sample_list_decrement_refcount(cd, allocation_samples);
+static void collector_cdata_gc_free_allocation_samples(struct collector_cdata *cd) {
+    internal_sample_list_decrement_refcount(cd, cd->allocation_samples);
     cd->allocation_samples = NULL;
 }
 
@@ -163,7 +161,7 @@ static void collector_cdata_gc_free(void *ptr) {
     mpp_pthread_mutex_lock(&cd->lock);
 
     collector_cdata_gc_free_heap_samples(cd);
-    collector_cdata_gc_free_allocation_samples(cd, cd->allocation_samples);
+    collector_cdata_gc_free_allocation_samples(cd);
     collector_cdata_gc_free_loctab(cd);
     collector_cdata_gc_free_strtab(cd);
 
@@ -612,7 +610,7 @@ static VALUE collector_start(VALUE self) {
         cd->heap_samples_count = 0;
     }
     if (cd->allocation_samples_count > 0) {
-        collector_cdata_gc_free_allocation_samples(cd, cd->allocation_samples);
+        collector_cdata_gc_free_allocation_samples(cd);
         cd->allocation_samples = NULL;
         cd->allocation_samples_count = 0;
         cd->pending_size_count = 0;
@@ -756,7 +754,7 @@ static VALUE collector_flush(VALUE self) {
     // Do cleanup here now.
 out:
     if (serctx) mpp_pprof_serctx_destroy(serctx);
-    if (sample_list) collector_cdata_gc_free_allocation_samples(cd, sample_list);
+    if (sample_list) internal_sample_decrement_refcount(cd, sample_list);
 
     // Now return-or-raise back to ruby.
     if (jump_tag) {
