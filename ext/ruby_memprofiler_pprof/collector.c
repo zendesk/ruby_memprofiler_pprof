@@ -447,6 +447,19 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     rb_protect(collector_tphook_newobj_protected, (VALUE)&args, &jump_tag);
     if (jump_tag) goto out;
 
+    // This looks super redundant, _BUT_ there is a narrow possibility that some of the code we invoke
+    // inside the rb_protect actually does RVALUE allocations itself, and so recursively runs this hook
+    // (which wokk work, because the &cd->lock mutex is recursive). So, we need to actually check
+    // our buffer sizes _again_.
+    if (cd->allocation_samples_count >= cd->max_allocation_samples) {
+        __atomic_add_fetch(&cd->dropped_samples_allocation_bufsize, 1, __ATOMIC_SEQ_CST);
+        goto out;
+    }
+    if (cd->heap_samples_count >= cd->max_heap_samples) {
+        __atomic_add_fetch(&cd->dropped_samples_heap_bufsize, 1, __ATOMIC_SEQ_CST);
+        goto out;
+    }
+
     // No error was thrown, add it to our sample buffers.
     struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
     // Set the sample refcount to two. Once because it's going in the allocation sampling buffer,
