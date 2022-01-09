@@ -5,7 +5,7 @@ describe MemprofilerPprof::Collector do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
     c.start!
     xx = dummy_fn1
-    profile_bytes = c.flush
+    profile_bytes = c.flush.pprof_data
     c.stop!
 
     # Make sure stuff did actually get allocated
@@ -37,7 +37,7 @@ describe MemprofilerPprof::Collector do
     objs_start = GC.stat(:total_allocated_objects)
     dummy_fn1
     objs_stop = GC.stat(:total_allocated_objects)
-    profile_bytes = c.flush
+    profile_bytes = c.flush.pprof_data
     c.stop!
 
     pprof = decode_pprof(profile_bytes)
@@ -61,7 +61,7 @@ describe MemprofilerPprof::Collector do
     c.start!
     big_allocation_func
     medium_allocation_func
-    profile_bytes = c.flush
+    profile_bytes = c.flush.pprof_data
     c.stop!
 
     pprof = decode_pprof(profile_bytes)
@@ -101,7 +101,7 @@ describe MemprofilerPprof::Collector do
       2.times { GC.compact }
     }.call
 
-    ct = c.live_object_count
+    ct = c.live_heap_samples_count
     c.stop!
 
     assert_operator ct, :<, 100
@@ -136,7 +136,7 @@ describe MemprofilerPprof::Collector do
       Ractor.select(r1, r2)
     end
 
-    profile_bytes = c.flush
+    profile_bytes = c.flush.pprof_data
     c.stop!
 
     pprof = decode_pprof(profile_bytes)
@@ -147,5 +147,20 @@ describe MemprofilerPprof::Collector do
 
     assert_operator ractor1_stacks, :>, 0
     assert_operator ractor2_stacks, :>, 0
+  end
+
+  it 'respects max samples' do
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0, max_allocation_samples: 20)
+    c.start!
+    100.times { SecureRandom.hex 50 }
+    profile_data = c.flush
+    c.stop!
+
+    assert_equal 20, profile_data.allocation_samples_count
+    assert_operator profile_data.dropped_samples_allocation_bufsize, :>=, 80
+
+    pprof = decode_pprof(profile_data.pprof_data)
+    allocating_stacks = allocation_function_backtraces pprof
+    assert_equal 20, allocating_stacks.size
   end
 end
