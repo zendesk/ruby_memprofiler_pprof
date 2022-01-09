@@ -65,7 +65,7 @@ class DecodedProfileData
 
   if Gem::Version.new(RUBY_VERSION) < Gem::Version.new("2.7")
     def method_missing(m, *args, &blk)
-      @profile_data.send(m, *args, **kwargs, &blk)
+      @profile_data.send(m, *args, &blk)
     end
   else
     def method_missing(m, *args, **kwargs, &blk)
