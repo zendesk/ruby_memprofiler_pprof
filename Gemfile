@@ -11,3 +11,5 @@ gem "rake-compiler", "~> 1"
 gem "bump", "~> 0.10"
 gem 'google-protobuf', '~> 3'
 gem 'pry', '~> 0.14'
+gem 'timecop', '~> 0.9'
+

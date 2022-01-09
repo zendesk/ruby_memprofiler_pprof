@@ -1,9 +1,12 @@
+# frozen_string_literal: true
+
 require 'bundler/setup'
 require 'ruby_memprofiler_pprof'
 require_relative 'pprof_pb'
 require "minitest/autorun"
 require 'securerandom'
 require 'zlib'
+require 'timecop'
 
 # Some dummy functions that call each other
 class DecodedProfileData
@@ -21,8 +24,14 @@ class DecodedProfileData
   attr_reader :samples
 
   def initialize(profile_data)
-    @profile_data = profile_data
-    @pprof = Perftools::Profiles::Profile.decode Zlib.gunzip(@profile_data.pprof_data)
+    if profile_data.is_a?(MemprofilerPprof::ProfileData)
+      @profile_data = profile_data
+      pprof_data = @profile_data.pprof_data
+    else
+      @profile_data = nil
+      pprof_data = profile_data
+    end
+    @pprof = Perftools::Profiles::Profile.decode Zlib.gunzip(pprof_data)
 
     @fn_map = @pprof.function.to_h { |fn| [fn.id, fn] }
     @loc_map = @pprof.location.to_h { |loc| [loc.id, loc] }

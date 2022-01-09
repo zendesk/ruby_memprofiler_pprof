@@ -23,6 +23,7 @@ GEM
     rake-compiler (1.1.1)
       rake
     thor (1.1.0)
+    timecop (0.9.4)
 
 PLATFORMS
   ruby
@@ -38,6 +39,7 @@ DEPENDENCIES
   rake (~> 13)
   rake-compiler (~> 1)
   ruby_memprofiler_pprof!
+  timecop (~> 0.9)
 
 BUNDLED WITH
    2.3.3
