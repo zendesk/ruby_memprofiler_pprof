@@ -12,7 +12,7 @@ Gem::Specification.new do |spec|
 
   spec.metadata["allowed_push_host"] = "https://zdrepo.jfrog.io/zdrepo/api/gems/gems-local/"
 
-  spec.files = Dir.glob("{ext,lib}/**/*")
+  spec.files = Dir.glob("{ext,lib}/**/*").reject { |f| %w[.so .bundle].include? File.extname(f) }
   spec.extensions = ["ext/ruby_memprofiler_pprof/extconf.rb"]
 
   spec.required_ruby_version = ">= 2.6.8"

@@ -40,7 +40,8 @@ internal_headers = proc {
 }
 
 dir_config('ruby')
-unless Debase::RubyCoreSource.create_makefile_with_core(internal_headers, "ruby_memprofiler_pprof_ext")
+extname = "ruby_memprofiler_pprof/ruby_memprofiler_pprof_ext"
+unless Debase::RubyCoreSource.create_makefile_with_core(internal_headers, extname)
   STDERR.print("Makefile creation failed\n")
   STDERR.print("*************************************************************\n\n")
   STDERR.print("  NOTE: If your headers were not found, try passing\n")
