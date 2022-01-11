@@ -111,8 +111,10 @@ int mpp_pprof_serctx_set_loctab(
     // Intern some strings we'll need to produce our output
     mpp_strtab_intern_cstr(loctab->strtab, "allocations", &ctx->internstr_allocations, NULL);
     mpp_strtab_intern_cstr(loctab->strtab, "count", &ctx->internstr_count, NULL);
-    mpp_strtab_intern_cstr(loctab->strtab, "size", &ctx->internstr_size, NULL);
+    mpp_strtab_intern_cstr(loctab->strtab, "allocation_size", &ctx->internstr_allocation_size, NULL);
     mpp_strtab_intern_cstr(loctab->strtab, "bytes", &ctx->internstr_bytes, NULL);
+    mpp_strtab_intern_cstr(loctab->strtab, "retained_objects", &ctx->internstr_retained_objects, NULL);
+    mpp_strtab_intern_cstr(loctab->strtab, "retained_size", &ctx->internstr_retained_size, NULL);
 
     ctx->strindex = mpp_strtab_index(loctab->strtab);
     MPP_ASSERT_MSG(ctx->strindex, "mpp_strtab_index returned 0");
@@ -130,7 +132,11 @@ int mpp_pprof_serctx_set_loctab(
     // Set up the sample types etc.
     perftools_profiles_ValueType *allocations_vt =
         perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
-    perftools_profiles_ValueType *size_vt =
+    perftools_profiles_ValueType *allocation_size_vt =
+        perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
+    perftools_profiles_ValueType *retained_objects_vt =
+        perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
+    perftools_profiles_ValueType *retained_size_vt =
         perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
 #define VT_SET_STRINTERN_FIELD(vt, field, str)                                                              \
     do {                                                                                                    \
@@ -144,8 +150,12 @@ int mpp_pprof_serctx_set_loctab(
 
     VT_SET_STRINTERN_FIELD(allocations_vt, type, ctx->internstr_allocations);
     VT_SET_STRINTERN_FIELD(allocations_vt, unit, ctx->internstr_count);
-    VT_SET_STRINTERN_FIELD(size_vt, type, ctx->internstr_size);
-    VT_SET_STRINTERN_FIELD(size_vt, unit, ctx->internstr_bytes);
+    VT_SET_STRINTERN_FIELD(allocation_size_vt, type, ctx->internstr_allocation_size);
+    VT_SET_STRINTERN_FIELD(allocation_size_vt, unit, ctx->internstr_bytes);
+    VT_SET_STRINTERN_FIELD(retained_objects_vt, type, ctx->internstr_retained_objects);
+    VT_SET_STRINTERN_FIELD(retained_objects_vt, unit, ctx->internstr_count);
+    VT_SET_STRINTERN_FIELD(retained_size_vt, type, ctx->internstr_retained_size);
+    VT_SET_STRINTERN_FIELD(retained_size_vt, unit, ctx->internstr_bytes);
 #undef VT_SET_STRINTERN_FIELD
 
     // Set up the location array.
@@ -174,7 +184,7 @@ int mpp_pprof_serctx_set_loctab(
 }
 
 int mpp_pprof_serctx_add_sample(
-    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen
+    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, int sample_type, char *errbuf, size_t errbuflen
 ) {
     perftools_profiles_Sample *sample_proto = perftools_profiles_Profile_add_sample(ctx->profile_proto, ctx->arena);
     uint64_t *location_ids =
@@ -186,11 +196,23 @@ int mpp_pprof_serctx_add_sample(
         location_ids[i] = sample->bt->frame_locations[sample->bt->frames_count - i - 1];
     }
 
-    // First sample is 1, for "allocation count"
-    perftools_profiles_Sample_add_value(sample_proto, 1, ctx->arena);
-    // Second sample is the size of the allocation
-    perftools_profiles_Sample_add_value(sample_proto, (int64_t)sample->allocation_size, ctx->arena);
-
+    // Values are (allocation_count, allocation_size, retained_count, retained_size).
+    int64_t allocation_count = 0;
+    int64_t allocation_size = 0;
+    int64_t retained_count = 0;
+    int64_t retained_size = 0;
+    if (sample_type == MPP_SAMPLE_TYPE_ALLOCATION) {
+        allocation_count = 1;
+        allocation_size = (int64_t)sample->allocation_size;
+    }
+    if (sample_type == MPP_SAMPLE_TYPE_HEAP) {
+        retained_count = 1;
+        retained_size = (int64_t)sample->current_size;
+    }
+    perftools_profiles_Sample_add_value(sample_proto, allocation_count, ctx->arena);
+    perftools_profiles_Sample_add_value(sample_proto, allocation_size, ctx->arena);
+    perftools_profiles_Sample_add_value(sample_proto, retained_count, ctx->arena);
+    perftools_profiles_Sample_add_value(sample_proto, retained_size, ctx->arena);
     return 0;
 }
 

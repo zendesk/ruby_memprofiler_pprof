@@ -240,6 +240,8 @@ struct mpp_sample {
     int64_t refcount;
     // How big this allocation was.
     size_t allocation_size;
+    // How big this object _currently_ is
+    size_t current_size;
     // Weak reference to what was allocated. Validate that it's alive by consulting the live object table first.
     VALUE allocated_value_weak;
     // Next element in the allocation profiling sample list. DO NOT use this in the heap profiling table.
@@ -266,15 +268,26 @@ struct mpp_pprof_serctx {
     // (the pprof format requires these strings to be in the string table along with the rest of them)
     const char *internstr_allocations;
     const char *internstr_count;
-    const char *internstr_size;
+    const char *internstr_allocation_size;
     const char *internstr_bytes;
+    const char *internstr_retained_objects;
+    const char *internstr_retained_size;
 };
+
+#define MPP_SAMPLE_TYPE_ALLOCATION 1
+#define MPP_SAMPLE_TYPE_HEAP 2
 
 struct mpp_pprof_serctx *mpp_pprof_serctx_new();
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
-int mpp_pprof_serctx_set_loctab(struct mpp_pprof_serctx *ctx, struct mpp_rb_loctab *loctab, char *errbuf, size_t errbuflen);
-int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen);
-int mpp_pprof_serctx_serialize(struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen);
+int mpp_pprof_serctx_set_loctab(
+    struct mpp_pprof_serctx *ctx, struct mpp_rb_loctab *loctab, char *errbuf, size_t errbuflen
+);
+int mpp_pprof_serctx_add_sample(
+    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, int sample_type, char *errbuf, size_t errbuflen
+);
+int mpp_pprof_serctx_serialize(
+    struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen
+);
 
 // ======== COLLECTOR RUBY CLASS ========
 extern VALUE mMemprofilerPprof;

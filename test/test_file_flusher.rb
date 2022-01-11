@@ -62,9 +62,9 @@ describe MemprofilerPprof::FileFlusher do
     profile_1 = DecodedProfileData.new(File.read("#{@dir}/0.pprof"))
     profile_2 = DecodedProfileData.new(File.read("#{@dir}/1.pprof"))
 
-    assert profile_1.samples_including_stack(['alloc_method_1']).size > 0
-    assert profile_1.samples_including_stack(['alloc_method_2']).empty?
-    assert profile_2.samples_including_stack(['alloc_method_2']).size > 0
-    assert profile_2.samples_including_stack(['alloc_method_1']).empty?
+    assert profile_1.allocation_samples_including_stack(['alloc_method_1']).size > 0
+    assert profile_1.allocation_samples_including_stack(['alloc_method_2']).empty?
+    assert profile_2.allocation_samples_including_stack(['alloc_method_2']).size > 0
+    assert profile_2.allocation_samples_including_stack(['alloc_method_1']).empty?
   end
 end

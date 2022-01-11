@@ -317,7 +317,7 @@ void mpp_rb_backtrace_capture_slowrb(struct mpp_rb_loctab *loctab, struct mpp_rb
     bt->frame_locations = mpp_xmalloc(sizeof(uint64_t) * ruby_bt_len);
     bt->frames_count = 0;
     bt->memsize = sizeof(uint64_t) * ruby_bt_len;
-    
+
     for (int64_t i = 0; i < ruby_bt_len; i++) {
         // The backtrace_locations result is backwards compared to the fast version.
         VALUE ruby_bt_loc = RARRAY_AREF(ruby_bt, ruby_bt_len - i - 1);

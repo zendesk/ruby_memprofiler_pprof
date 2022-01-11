@@ -28,9 +28,9 @@ describe MemprofilerPprof::Collector do
 
     # Decode the sample backtraces
     pprof = DecodedProfileData.new(profile_data)
-    fn2_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2]
-    fn3_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3]
-    fn4_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3 dummy_fn4]
+    fn2_stacks = pprof.allocation_samples_including_stack %w[dummy_fn1 dummy_fn2]
+    fn3_stacks = pprof.allocation_samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3]
+    fn4_stacks = pprof.allocation_samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3 dummy_fn4]
 
     # It's basically impossible to know how many allocations these things are doing; a lot of the allocations
     # actually come from (cfunc)'s underneath these functions too (e.g. "*"). Just assert that we got some
@@ -135,19 +135,11 @@ describe MemprofilerPprof::Collector do
     # If we're not handling compaction correctly, this will segfault because we won't notice
     # that all the elements of the_array got moved.
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-    ct = nil
+    keep_live = nil
     c.profile do
       keep_live = big_array_compacting_method
       2.times { GC.compact }
-      keep_live.slice!(1, keep_live.size - 1)
-      GC.stress = true
-      100.times { GC.start(full_mark: true, immediate_sweep: true) }
-      GC.stress = false
-      2.times { GC.compact }
-      ct = c.live_heap_samples_count
     end
-
-    assert_operator ct, :<, 100
   end
 
   it 'captures allocations in multiple ractors' do
@@ -188,7 +180,7 @@ describe MemprofilerPprof::Collector do
     assert_operator ractor2_stacks, :>, 0
   end
 
-  it 'respects max samples' do
+  it 'respects max allocation samples' do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0, max_allocation_samples: 20)
     profile_data = c.profile do
       100.times { SecureRandom.hex 50 }
@@ -197,6 +189,41 @@ describe MemprofilerPprof::Collector do
     pprof = DecodedProfileData.new(profile_data)
     assert_equal 20, pprof.allocation_samples_count
     assert_operator pprof.dropped_samples_allocation_bufsize, :>=, 80
-    assert_equal 20, pprof.samples.size
+    assert_equal 20, pprof.allocation_samples.size
+  end
+
+  it 'respects max heap samples' do
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0, max_heap_samples: 20)
+    retain = []
+    profile_data = c.profile do
+      100.times { retain << SecureRandom.hex(50) }
+    end
+
+    pprof = DecodedProfileData.new(profile_data)
+    assert_equal 20, pprof.allocation_samples_count
+    assert_operator pprof.dropped_samples_heap_bufsize, :>=, 80
+    assert_equal 20, pprof.allocation_samples.size
+  end
+
+  it 'captures backtraces for retained objects' do
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
+
+    $leaky_bucket = []
+    def leak_into_bucket
+      $leaky_bucket << SecureRandom.hex(20)
+    end
+
+    c.start!
+    1000.times { leak_into_bucket }
+    profile_1 = DecodedProfileData.new c.flush
+    profile_2 = DecodedProfileData.new c.flush
+    $leaky_bucket = nil
+    10.times { GC.start }
+    profile_3 = DecodedProfileData.new c.flush
+    c.stop!
+
+    assert_operator profile_1.heap_samples_including_stack(['leak_into_bucket']).size, :>=, 1000
+    assert_operator profile_2.heap_samples_including_stack(['leak_into_bucket']).size, :>=, 1000
+    assert_operator profile_3.heap_samples_including_stack(['leak_into_bucket']).size, :<, 10
   end
 end

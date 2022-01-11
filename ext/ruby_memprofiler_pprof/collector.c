@@ -400,6 +400,7 @@ static void collector_mark_sample_as_freed(struct collector_cdata *cd, VALUE fre
     }
 }
 
+
 struct newobj_impl_args {
     struct collector_cdata *cd;
     struct mpp_rb_backtrace *bt;
@@ -412,9 +413,6 @@ struct newobj_impl_args {
 static VALUE collector_tphook_newobj_protected(VALUE args_as_uintptr) {
     struct newobj_impl_args *args = (struct newobj_impl_args*)args_as_uintptr;
     struct collector_cdata *cd = args->cd;
-    VALUE tpval = args->tpval;
-    rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
-    args->newobj = rb_tracearg_object(tparg);
     if (cd->bt_method == MPP_BT_METHOD_CFP) {
         mpp_rb_backtrace_capture(cd->loctab, &args->bt);
     } else if (cd->bt_method == MPP_BT_METHOD_SLOWRB) {
@@ -432,22 +430,24 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     args.cd = cd;
     args.tpval = tpval;
     args.bt = NULL;
+    rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
+    args.newobj = rb_tracearg_object(tparg);
     int jump_tag = 0;
     VALUE original_errinfo = Qundef;
 
-    // Before doing anything involving ruby (slow, because we need to rb_protect it), do the sample
-    // random number check in C first. This will be the fast path in most executions of this method.
-    // Also do it with an atomic because it's happening before the lock.
+    mpp_pthread_mutex_lock(&cd->lock);
+
+    // For every new object that is created, we _MUST_ check if there is already another VALUE with the same,
+    // well, value, in our heap profiling table of live objects. This is because Ruby reserves the right to
+    // simply free some kinds of internal objects (such as T_IMEMOs) by simply setting the flags value on it
+    // to zero, without invoking the GC and without calling any kind of hook. So, we need to detect when such
+    // an object is freed and then the RVALUE is re-used for a new object to track it appropriately.
+    collector_mark_sample_as_freed(cd, args.newobj);
+
+    // Skip the rest of this method if we're not sampling.
     uint32_t sample_rate = __atomic_load_n(&cd->u32_sample_rate, __ATOMIC_SEQ_CST);
     if (mpp_rand() > sample_rate) {
        return;
-    }
-
-    // If we can't acquire the mutex (perhaps another ractor has it?), don't block! just skip this
-    // sample.
-    if (mpp_pthread_mutex_trylock(&cd->lock) != 0) {
-        __atomic_add_fetch(&cd->dropped_samples_nolock, 1, __ATOMIC_SEQ_CST);
-        return;
     }
 
     // Make sure there's enough space in our buffers.
@@ -478,16 +478,6 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
         goto out;
     }
 
-    // This is also super-unlikely, but it _is_ possible that there might _already_ be an entry for
-    // this VALUE in our heap_samples buffer; this is because for some kinds of internal objects
-    // under some circumstances, Ruby frees them directly (by setting RVALUE->flags to 0) without
-    // actually waiting for them to be GC'd (and thus, without having the GC free hook invoked). Then,
-    // this VALUE could be re-used for a new object.
-    // We detect that by seeing if this VALUE is re-using a VALUE we already have; in that case, consider
-    // the previous sample to be freed.
-    collector_mark_sample_as_freed(cd, args.newobj);
-
-
     // OK, now it's time to add to our sample buffers.
     struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
     // Set the sample refcount to two. Once because it's going in the allocation sampling buffer,
@@ -495,6 +485,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     sample->refcount = 2;
     sample->bt = args.bt;
     sample->allocation_size = args.allocation_size;
+    sample->current_size = args.allocation_size;
     sample->allocated_value_weak = args.newobj;
 
     // Insert into allocation profiling list.
@@ -553,6 +544,7 @@ static VALUE collector_tphook_creturn_protected(VALUE cdataptr) {
         }
         if (s->allocated_value_weak != Qundef) {
             s->allocation_size = rb_obj_memsize_of(s->allocated_value_weak);
+            s->current_size = s->allocation_size;
         }
         s = s->next_alloc;
     }
@@ -675,7 +667,48 @@ static VALUE collector_is_running(VALUE self) {
     return running ? Qtrue : Qfalse;
 }
 
-struct collector_rotate_profile_cimpl_prepresult_args {
+static int collector_heap_samples_each_calc_size(st_data_t key, st_data_t val, st_data_t arg) {
+    struct mpp_sample *sample = (struct mpp_sample *)val;
+    struct collector_cdata *cd = (struct collector_cdata *)arg;
+    MPP_ASSERT_MSG(sample->allocated_value_weak != Qundef, "undef was in heap sample map");
+
+    // Check that the sample is, in fact, still live. This can happen if an object is freed internally
+    // by Ruby without firing our freeobj hook (which Ruby is allowed to do for some kinds of objects).
+    // In that case, flags will be zero and so type will be T_NONE.
+    // Note that if an object is freed and then the slot is subsequently re-used for a different object,
+    // our newobj hook will fire in that case and do this too. So this method captures the sequence
+    // allocate -> free -> flush, but the newobj hook handles the allocate -> free -> reuse -> flush case.
+    if (RB_TYPE_P(sample->allocated_value_weak, T_NONE)) {
+        sample->allocated_value_weak = Qundef;
+        internal_sample_decrement_refcount(cd, sample);
+        cd->heap_samples_count--;
+        return ST_DELETE;
+    }
+
+    sample->current_size = rb_obj_memsize_of(sample->allocated_value_weak);
+    return ST_CONTINUE;
+}
+
+struct collector_heap_samples_each_add_args {
+    struct mpp_pprof_serctx *serctx;
+    char *errbuf;
+    size_t errbuf_len;
+    int r;
+};
+
+static int collector_heap_samples_each_add(st_data_t key, st_data_t val, st_data_t arg) {
+    struct mpp_sample *sample = (struct mpp_sample *)val;
+    struct collector_heap_samples_each_add_args *args = (struct collector_heap_samples_each_add_args *)arg;
+
+    int r = mpp_pprof_serctx_add_sample(args->serctx, sample, MPP_SAMPLE_TYPE_HEAP, args->errbuf, args->errbuf_len);
+    if (r != 0) {
+        args->r = r;
+        return ST_STOP;
+    }
+    return ST_CONTINUE;
+}
+
+struct collector_flush_prepresult_args {
     const char *pprofbuf;
     size_t pprofbuf_len;
 
@@ -687,9 +720,15 @@ struct collector_rotate_profile_cimpl_prepresult_args {
     int64_t dropped_samples_heap_bufsize;
 };
 
-static VALUE collector_rotate_profile_cimpl_prepresult(VALUE vargs) {
-    struct collector_rotate_profile_cimpl_prepresult_args *args =
-        (struct collector_rotate_profile_cimpl_prepresult_args *)vargs;
+static VALUE collector_flush_protected_heap_sample_size(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    st_foreach(cd->heap_samples, collector_heap_samples_each_calc_size, (st_data_t)cd);
+    return Qnil;
+}
+
+static VALUE collector_flush_prepresult(VALUE vargs) {
+    struct collector_flush_prepresult_args *args =
+        (struct collector_flush_prepresult_args *)vargs;
 
     VALUE pprof_data = rb_str_new(args->pprofbuf, args->pprofbuf_len);
     VALUE profile_data = rb_class_new_instance(0, NULL, cProfileData);
@@ -718,10 +757,12 @@ static VALUE collector_flush(VALUE self) {
     int r = 0;
     VALUE retval = Qundef;
     struct mpp_sample *sample_list = NULL;
-    struct collector_rotate_profile_cimpl_prepresult_args prepresult_args;
+    struct collector_flush_prepresult_args prepresult_args;
+    int lock_held = 0;
 
     // Whilst under the GVL, we need to get the collector lock
     mpp_pthread_mutex_lock(&cd->lock);
+    lock_held = 1;
 
     sample_list = cd->allocation_samples;
     cd->allocation_samples = NULL;
@@ -737,6 +778,10 @@ static VALUE collector_flush(VALUE self) {
     prepresult_args.dropped_samples_heap_bufsize =
         __atomic_exchange_n(&cd->dropped_samples_heap_bufsize, 0, __ATOMIC_SEQ_CST);
 
+    // Get the current size for everything in the live allocations table.
+    rb_protect(collector_flush_protected_heap_sample_size, self, &jump_tag);
+    if (jump_tag) goto out;
+
     serctx = mpp_pprof_serctx_new();
     MPP_ASSERT_MSG(serctx, "mpp_pprof_serctx_new failed??");
     r = mpp_pprof_serctx_set_loctab(serctx, cd->loctab, errbuf, sizeof(errbuf));
@@ -747,16 +792,26 @@ static VALUE collector_flush(VALUE self) {
     // Now that we have the samples (and have processed the stringtab) we can
     // yield the lock.
     mpp_pthread_mutex_unlock(&cd->lock);
+    lock_held = 0;
 
+    // Add the allocation samples
     struct mpp_sample *s = sample_list;
     while (s) {
-        r = mpp_pprof_serctx_add_sample(serctx, s, errbuf, sizeof(errbuf));
+        r = mpp_pprof_serctx_add_sample(serctx, s, MPP_SAMPLE_TYPE_ALLOCATION, errbuf, sizeof(errbuf));
         if (r == -1) {
             goto out;
         }
         s = s->next_alloc;
     }
 
+    // Add the heap samples
+    struct collector_heap_samples_each_add_args heap_add_args;
+    heap_add_args.serctx = serctx;
+    heap_add_args.errbuf = errbuf;
+    heap_add_args.errbuf_len = sizeof(errbuf);
+    heap_add_args.r = 0;
+    st_foreach(cd->heap_samples, collector_heap_samples_each_add, (st_data_t)&heap_add_args);
+    if (heap_add_args.r != 0) goto out;
 
     r = mpp_pprof_serctx_serialize(serctx, &buf_out, &buflen_out, errbuf, sizeof(errbuf));
     if ( r == -1) {
@@ -766,11 +821,12 @@ static VALUE collector_flush(VALUE self) {
     // of our return value to ensure we don't leak serctx.
     prepresult_args.pprofbuf = buf_out;
     prepresult_args.pprofbuf_len = buflen_out;
-    retval = rb_protect(collector_rotate_profile_cimpl_prepresult, (VALUE)&prepresult_args, &jump_tag);
+    retval = rb_protect(collector_flush_prepresult, (VALUE)&prepresult_args, &jump_tag);
 
     // Do cleanup here now.
 out:
     if (serctx) mpp_pprof_serctx_destroy(serctx);
+    if (lock_held) mpp_pthread_mutex_unlock(&cd->lock);
     if (sample_list) internal_sample_decrement_refcount(cd, sample_list);
 
     // Now return-or-raise back to ruby.
