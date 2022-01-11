@@ -167,6 +167,10 @@ typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size
 void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *ctx);
 
 // ======== BACKTRACE DECLARATIONS ========
+
+#define MPP_BT_METHOD_CFP 1
+#define MPP_BT_METHOD_SLOWRB 2
+
 struct mpp_rb_backtrace {
     // The array of frames - most recent call FIRST.
     uint64_t *frame_locations;
@@ -218,6 +222,7 @@ struct mpp_rb_loctab {
 struct mpp_rb_loctab *mpp_rb_loctab_new(struct mpp_strtab *strtab);
 void mpp_rb_loctab_destroy(struct mpp_rb_loctab *loctab);
 void mpp_rb_backtrace_capture(struct mpp_rb_loctab *locatb, struct mpp_rb_backtrace **bt_out);
+void mpp_rb_backtrace_capture_slowrb(struct mpp_rb_loctab *locatb, struct mpp_rb_backtrace **bt_out);
 void mpp_rb_backtrace_destroy(struct mpp_rb_loctab *locatb, struct mpp_rb_backtrace *bt);
 size_t mpp_rb_backtrace_memsize(struct mpp_rb_backtrace *bt);
 size_t mpp_rb_loctab_memsize(struct mpp_rb_loctab *loctab);

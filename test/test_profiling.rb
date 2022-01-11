@@ -40,6 +40,40 @@ describe MemprofilerPprof::Collector do
     assert_operator fn4_stacks.size, :>=, 1
   end
 
+  it 'captures backtraces for memory allocations in slowrb mode' do
+    def dummy_fn1
+      dummy_fn2
+    end
+
+    def dummy_fn2
+      v1 = "a" * 1024
+      v1 + dummy_fn3 + dummy_fn4
+    end
+
+    def dummy_fn3
+      SecureRandom.hex(512) + dummy_fn4
+    end
+
+    def dummy_fn4
+      'z' * 1024
+    end
+
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0, bt_method: :slowrb)
+    profile_data = c.profile do
+      xx = dummy_fn1
+    end
+
+    # Decode the sample backtraces
+    pprof = DecodedProfileData.new(profile_data)
+    fn2_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2]
+    fn3_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3]
+    fn4_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3 dummy_fn4]
+
+    assert_operator fn2_stacks.size, :>=, 1
+    assert_operator fn3_stacks.size, :>=, 1
+    assert_operator fn4_stacks.size, :>=, 1
+  end
+
   it 'captures all allocations when sample rate is 1' do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
 

@@ -96,7 +96,8 @@ Benchmark.bm(20) do |b|
   sc = benchmark_scenario.dup
   GC.start
   $collector = MemprofilerPprof::Collector.new
-  $collector.sample_rate = 0.01
+  $collector.sample_rate = 0.1
+  $collector.bt_method = :cfp
   b.report("with_profiling") do
     $collector.start!
 
@@ -113,8 +114,22 @@ Benchmark.bm(20) do |b|
 
     benchmark_machine(sc, leak_pit)
     File.open('tmp/benchmark.pb.gz', 'w') do |f|
-      f.write $collector.flush
+      f.write $collector.flush.pprof_data
     end
+    $collector.stop!
+  end
+
+  leak_pit = []
+  sc = benchmark_scenario.dup
+  GC.start
+  $collector = MemprofilerPprof::Collector.new
+  $collector.sample_rate = 0.1
+  $collector.bt_method = :slowrb
+  b.report("with_slowrb_backtrace") do
+    $collector.start!
+
+    benchmark_machine(sc, leak_pit)
+
     $collector.stop!
   end
 end

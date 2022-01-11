@@ -21,7 +21,7 @@ class DecodedProfileData
     end
   end
 
-  attr_reader :samples
+  attr_reader :samples, :pprof
 
   def initialize(profile_data)
     if profile_data.is_a?(MemprofilerPprof::ProfileData)

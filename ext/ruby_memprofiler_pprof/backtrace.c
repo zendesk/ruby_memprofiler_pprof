@@ -308,6 +308,63 @@ void mpp_rb_backtrace_capture(struct mpp_rb_loctab *loctab, struct mpp_rb_backtr
     }
 }
 
+void mpp_rb_backtrace_capture_slowrb(struct mpp_rb_loctab *loctab, struct mpp_rb_backtrace **bt_out) {
+    VALUE ruby_bt = rb_funcall(rb_thread_current(), rb_intern("backtrace_locations"), 0);
+    int64_t ruby_bt_len = RARRAY_LEN(ruby_bt);
+
+    *bt_out = mpp_xmalloc(sizeof(struct mpp_rb_backtrace));
+    struct mpp_rb_backtrace *bt = *bt_out;
+    bt->frame_locations = mpp_xmalloc(sizeof(uint64_t) * ruby_bt_len);
+    bt->frames_count = 0;
+    bt->memsize = sizeof(uint64_t) * ruby_bt_len;
+    
+    for (int64_t i = 0; i < ruby_bt_len; i++) {
+        // The backtrace_locations result is backwards compared to the fast version.
+        VALUE ruby_bt_loc = RARRAY_AREF(ruby_bt, ruby_bt_len - i - 1);
+
+        // Intern the function name as the function ID, and the full string as the loc id.
+        VALUE fn_name = rb_funcall(ruby_bt_loc, rb_intern("base_label"), 0);
+        const char *fn_name_interned;
+        size_t fn_name_interned_len;
+        mpp_strtab_intern_rbstr(loctab->strtab, fn_name, &fn_name_interned, &fn_name_interned_len);
+        VALUE loc_name = rb_funcall(ruby_bt_loc, rb_intern("to_s"), 0);
+        const char *loc_name_interned;
+        size_t loc_name_interned_len;
+        mpp_strtab_intern_rbstr(loctab->strtab, loc_name, &loc_name_interned, &loc_name_interned_len);
+
+        VALUE file_name = rb_funcall(ruby_bt_loc, rb_intern("path"), 0);
+
+        VALUE line_no = rb_funcall(ruby_bt_loc, rb_intern("lineno"), 0);
+        uint64_t line_no_int = 0;
+        if (RTEST(line_no)) {
+            line_no_int = NUM2ULONG(line_no);
+        }
+
+        bt->frame_locations[i] = (uint64_t)loc_name_interned;
+        bt->frames_count++;
+
+        // Lookup, or allocate & store, the location/function struct.
+        struct fnloc_st_update_args frame_args;
+        frame_args.loctab = loctab;
+        frame_args.location_id = (uint64_t)loc_name_interned;
+        frame_args.location_line_number = line_no_int;
+        frame_args.fn_name_value = fn_name;
+        frame_args.file_name_value = file_name;
+        frame_args.function_line_number = 0;
+        frame_args.function_id = (uint64_t)fn_name_interned;
+        st_update(loctab->locations, frame_args.location_id, location_st_update, (st_data_t)&frame_args);
+        frame_args.location->refcount++;
+        frame_args.function->refcount++;
+
+        // We _DEFINITELY_ leak memory here. We interned the function name string/location string to use
+        // as the unique int64 location ID, but we're not freeing it here. This is because we need to keep
+        // it in the table so that it continues to be unique (and some other location doesn't wind up with
+        // the same ID).
+        // Since this method basically exists for benchmarking, and real users should be using the CFP
+        // method, I'll live with the leak for now until I figure out a better unique ID for the function.
+    }
+}
+
 void mpp_rb_backtrace_destroy(struct mpp_rb_loctab *loctab, struct mpp_rb_backtrace *bt) {
     for (int64_t i = 0; i < bt->frames_count; i++) {
         st_update(loctab->locations, bt->frame_locations[i], location_st_deref, (st_data_t)loctab);

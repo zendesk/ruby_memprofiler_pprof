@@ -76,6 +76,9 @@ struct collector_cdata {
     struct mpp_strtab *string_tab;
     // Same thing, but for backtrace locations.
     struct mpp_rb_loctab *loctab;
+
+    // Which method to use for getting backtraces
+    int bt_method;
 };
 
 static void internal_sample_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
@@ -291,24 +294,24 @@ static VALUE collector_initialize_protected(VALUE vargs) {
     // Argument parsing
     VALUE kwargs_hash = Qnil;
     rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, args->argc, args->argv, "00:", &kwargs_hash);
-    VALUE kwarg_values[3];
-    ID kwarg_ids[3];
+    VALUE kwarg_values[4];
+    ID kwarg_ids[4];
     kwarg_ids[0] = rb_intern("sample_rate");
     kwarg_ids[1] = rb_intern("max_allocation_samples");
     kwarg_ids[2] = rb_intern("max_heap_samples");
-    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 3, kwarg_values);
+    kwarg_ids[3] = rb_intern("bt_method");
+    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 4, kwarg_values);
 
     // Default values...
     if (kwarg_values[0] == Qundef) kwarg_values[0] = DBL2NUM(0.01);
     if (kwarg_values[1] == Qundef) kwarg_values[1] = LONG2NUM(10000);
     if (kwarg_values[2] == Qundef) kwarg_values[2] = LONG2NUM(50000);
+    if (kwarg_values[3] == Qundef) kwarg_values[3] = rb_id2sym(rb_intern("cfp"));
 
-    // Convert the double sample rate (between 0 and 1) to a value between 0 and UINT32_MAX
-    // Don't know if setting it with an atomic is _strictly_ nescessary, but I did say
-    // "all access to u32_sample_rate is through atomics" so it's probably easier to than not.
-    __atomic_store_n(&cd->u32_sample_rate, (uint32_t)(UINT32_MAX * NUM2DBL(kwarg_values[0])), __ATOMIC_SEQ_CST);
-    cd->max_allocation_samples = NUM2LONG(kwarg_values[1]);
-    cd->max_heap_samples = NUM2LONG(kwarg_values[2]);
+    rb_funcall(args->self, rb_intern("sample_rate="), 1, kwarg_values[0]);
+    rb_funcall(args->self, rb_intern("max_allocation_samples="), 1, kwarg_values[1]);
+    rb_funcall(args->self, rb_intern("max_heap_samples="), 1, kwarg_values[2]);
+    rb_funcall(args->self, rb_intern("bt_method="), 1, kwarg_values[3]);
 
     cd->string_tab = mpp_strtab_new();
     cd->loctab = mpp_rb_loctab_new(cd->string_tab);
@@ -412,7 +415,13 @@ static VALUE collector_tphook_newobj_protected(VALUE args_as_uintptr) {
     VALUE tpval = args->tpval;
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
     args->newobj = rb_tracearg_object(tparg);
-    mpp_rb_backtrace_capture(cd->loctab, &args->bt);
+    if (cd->bt_method == MPP_BT_METHOD_CFP) {
+        mpp_rb_backtrace_capture(cd->loctab, &args->bt);
+    } else if (cd->bt_method == MPP_BT_METHOD_SLOWRB) {
+        mpp_rb_backtrace_capture_slowrb(cd->loctab, &args->bt);
+    } else {
+        MPP_ASSERT_FAIL("unknown bt_method");
+    }
     args->allocation_size = rb_obj_memsize_of(args->newobj);
     return Qnil;
 }
@@ -797,6 +806,43 @@ static VALUE collector_live_heap_samples_count(VALUE self) {
     return LONG2NUM(counter);
 }
 
+static VALUE collector_bt_method_get(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+
+    mpp_pthread_mutex_lock(&cd->lock);
+    int method = cd->bt_method;
+    mpp_pthread_mutex_unlock(&cd->lock);
+
+    if (method == MPP_BT_METHOD_CFP) {
+        return rb_id2sym(rb_intern("cfp"));
+    } else if (method == MPP_BT_METHOD_SLOWRB) {
+        return rb_id2sym(rb_intern("slowrb"));
+    } else {
+        MPP_ASSERT_FAIL("unknown bt_method");
+        return Qundef;
+    }
+}
+
+static VALUE collector_bt_method_set(VALUE self, VALUE newval) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+
+    ID bt_method = rb_sym2id(newval);
+    int method;
+    if (bt_method == rb_intern("cfp")) {
+        method = MPP_BT_METHOD_CFP;
+    } else if (bt_method == rb_intern("slowrb")) {
+        method = MPP_BT_METHOD_SLOWRB;
+    } else {
+        rb_raise(rb_eArgError, "passed value for bt_method was not recognised");
+    }
+
+    mpp_pthread_mutex_lock(&cd->lock);
+    cd->bt_method = method;
+    mpp_pthread_mutex_unlock(&cd->lock);
+
+    return newval;
+}
+
 void mpp_setup_collector_class() {
     cProfileData = rb_const_get(mMemprofilerPprof, rb_intern("ProfileData"));
     cCollector = rb_define_class_under(mMemprofilerPprof, "Collector", rb_cObject);
@@ -809,6 +855,8 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "max_allocation_samples=", collector_set_max_allocation_samples, 1);
     rb_define_method(cCollector, "max_heap_samples", collector_get_max_heap_samples, 0);
     rb_define_method(cCollector, "max_heap_samples=", collector_set_max_heap_samples, 1);
+    rb_define_method(cCollector, "bt_method", collector_bt_method_get, 0);
+    rb_define_method(cCollector, "bt_method=", collector_bt_method_set, 1);
     rb_define_method(cCollector, "running?", collector_is_running, 0);
     rb_define_method(cCollector, "start!", collector_start, 0);
     rb_define_method(cCollector, "stop!", collector_stop, 0);
