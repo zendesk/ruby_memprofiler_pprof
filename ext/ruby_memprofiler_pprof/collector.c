@@ -447,7 +447,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     // Skip the rest of this method if we're not sampling.
     uint32_t sample_rate = __atomic_load_n(&cd->u32_sample_rate, __ATOMIC_SEQ_CST);
     if (mpp_rand() > sample_rate) {
-       return;
+       goto out;
     }
 
     // Make sure there's enough space in our buffers.
