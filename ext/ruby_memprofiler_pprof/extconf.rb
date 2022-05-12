@@ -5,9 +5,11 @@ append_cflags([
   '-fvisibility=hidden', # Make sure our upb symbols don't clobber anybody elses
   '-Wno-unused-parameter', # Is generally annoying and the Ruby headers do it a bunch anyway
   '-Wno-unknown-warning-option', # A bit tautalogical
+  '-Wno-error=unknown-warning', # Likewise,
   '-Wno-declaration-after-statement', # Somehow, this is in CFLAGS somewhere? Who needs it?
   '-Wno-suggest-attribute=noreturn', # I will survive without this too.
-  "-Wno-sign-compare", # upb does this one.
+  '-Wno-error=sign-compare', # upb does this one.
+  '-Wno-error=clobbered', # and this one
 ])
 
 if ENV['WERROR'] == 'true'
