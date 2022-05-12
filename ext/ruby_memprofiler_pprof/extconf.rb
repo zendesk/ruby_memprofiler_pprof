@@ -34,20 +34,11 @@ append_cflags([
   '-fvisibility=hidden', # Make sure our upb symbols don't clobber any others from other exts
 ])
 append_cflags(['-Wall', '-Wextra']) # Enable all the warnings
-if ENV['WERROR'] == 'true'
-  append_cflags(['-Werror']) # Enable werror on CI
-end
 # These diagnostics are not very interesting at all, just disable them.
 append_cflags([
   '-Wno-unused-parameter',
   '-Wno-declaration-after-statement',
   '-Wno-suggest-attribute=noreturn',
-])
-# These diagnostics are interesting, but we can't -Werror them because upb commits some violations.
-# Keep the warnings on though so we don't add them to our own code.
-append_cflags([
-  '-Wno-error=sign-compare',
-  '-Wno-error=clobbered',
 ])
 
 # Compile the upb objects into our extension as well.

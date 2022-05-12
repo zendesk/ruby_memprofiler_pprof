@@ -30,11 +30,10 @@ jobs:
       - name: install_gems
         run: |
           bundle config path vendor/bundle
-          bundle install --jobs=3 --retry=3 --no-deployment
+          bundle install
       - name: compile
         run: |
-          gcc --version
-          bundle exec rake compile WERROR=true VERBOSE=true
+          bundle exec rake compile VERBOSE=true
       - name: test
         run: |
-          COVERAGE=true bundle exec rake test
+          bundle exec rake test
