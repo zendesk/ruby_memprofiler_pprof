@@ -27,18 +27,21 @@
 
 #include "python/descriptor_pool.h"
 
+#include "google/protobuf/descriptor.upbdefs.h"
+#include "python/convert.h"
 #include "python/descriptor.h"
 #include "python/message.h"
 #include "python/protobuf.h"
 #include "upb/def.h"
+#include "upb/util/def_to_proto.h"
 
 // -----------------------------------------------------------------------------
 // DescriptorPool
 // -----------------------------------------------------------------------------
 
 typedef struct {
-  PyObject_HEAD
-  upb_symtab* symtab;
+  PyObject_HEAD;
+  upb_DefPool* symtab;
   PyObject* db;  // The DescriptorDatabase underlying this pool.  May be NULL.
 } PyUpb_DescriptorPool;
 
@@ -47,10 +50,18 @@ PyObject* PyUpb_DescriptorPool_GetDefaultPool() {
   return s->default_pool;
 }
 
+const upb_MessageDef* PyUpb_DescriptorPool_GetFileProtoDef(void) {
+  PyUpb_ModuleState* s = PyUpb_ModuleState_Get();
+  if (!s->c_descriptor_symtab) {
+    s->c_descriptor_symtab = upb_DefPool_New();
+  }
+  return google_protobuf_FileDescriptorProto_getmsgdef(s->c_descriptor_symtab);
+}
+
 static PyObject* PyUpb_DescriptorPool_DoCreateWithCache(
     PyTypeObject* type, PyObject* db, PyUpb_WeakMap* obj_cache) {
   PyUpb_DescriptorPool* pool = (void*)PyType_GenericAlloc(type, 0);
-  pool->symtab = upb_symtab_new();
+  pool->symtab = upb_DefPool_New();
   pool->db = db;
   Py_XINCREF(pool->db);
   PyUpb_WeakMap_Add(obj_cache, pool->symtab, &pool->ob_base);
@@ -63,7 +74,7 @@ static PyObject* PyUpb_DescriptorPool_DoCreate(PyTypeObject* type,
                                                 PyUpb_ObjCache_Instance());
 }
 
-upb_symtab* PyUpb_DescriptorPool_GetSymtab(PyObject* pool) {
+upb_DefPool* PyUpb_DescriptorPool_GetSymtab(PyObject* pool) {
   return ((PyUpb_DescriptorPool*)pool)->symtab;
 }
 
@@ -78,7 +89,7 @@ static int PyUpb_DescriptorPool_Clear(PyUpb_DescriptorPool* self) {
   return 0;
 }
 
-PyObject* PyUpb_DescriptorPool_Get(const upb_symtab* symtab) {
+PyObject* PyUpb_DescriptorPool_Get(const upb_DefPool* symtab) {
   PyObject* pool = PyUpb_ObjCache_Get(symtab);
   assert(pool);
   return pool;
@@ -86,7 +97,7 @@ PyObject* PyUpb_DescriptorPool_Get(const upb_symtab* symtab) {
 
 static void PyUpb_DescriptorPool_Dealloc(PyUpb_DescriptorPool* self) {
   PyUpb_DescriptorPool_Clear(self);
-  upb_symtab_free(self->symtab);
+  upb_DefPool_Free(self->symtab);
   PyUpb_ObjCache_Delete(self->symtab);
   PyUpb_Dealloc(self);
 }
@@ -110,31 +121,77 @@ static PyObject* PyUpb_DescriptorPool_New(PyTypeObject* type, PyObject* args,
   return PyUpb_DescriptorPool_DoCreate(type, db);
 }
 
-/*
- * PyUpb_DescriptorPool_AddSerializedFile()
- *
- * Implements:
- *   DescriptorPool.AddSerializedFile(self, serialized_file_descriptor)
- *
- * Adds the given serialized FileDescriptorProto to the pool.
- */
-static PyObject* PyUpb_DescriptorPool_AddSerializedFile(
+static PyObject* PyUpb_DescriptorPool_DoAdd(PyObject* _self,
+                                            PyObject* file_desc);
+
+static bool PyUpb_DescriptorPool_TryLoadFileProto(PyUpb_DescriptorPool* self,
+                                                  PyObject* proto) {
+  if (proto == NULL) {
+    if (PyErr_ExceptionMatches(PyExc_KeyError)) {
+      // Expected error: item was simply not found.
+      PyErr_Clear();
+      return true;  // We didn't accomplish our goal, but we didn't error out.
+    }
+    return false;
+  }
+  if (proto == Py_None) return true;
+  PyObject* ret = PyUpb_DescriptorPool_DoAdd((PyObject*)self, proto);
+  bool ok = ret != NULL;
+  Py_XDECREF(ret);
+  return ok;
+}
+
+static bool PyUpb_DescriptorPool_TryLoadSymbol(PyUpb_DescriptorPool* self,
+                                               PyObject* sym) {
+  if (!self->db) return false;
+  PyObject* file_proto =
+      PyObject_CallMethod(self->db, "FindFileContainingSymbol", "O", sym);
+  bool ret = PyUpb_DescriptorPool_TryLoadFileProto(self, file_proto);
+  Py_XDECREF(file_proto);
+  return ret;
+}
+
+static bool PyUpb_DescriptorPool_TryLoadFilename(PyUpb_DescriptorPool* self,
+                                                 PyObject* filename) {
+  if (!self->db) return false;
+  PyObject* file_proto =
+      PyObject_CallMethod(self->db, "FindFileByName", "O", filename);
+  bool ret = PyUpb_DescriptorPool_TryLoadFileProto(self, file_proto);
+  Py_XDECREF(file_proto);
+  return ret;
+}
+
+bool PyUpb_DescriptorPool_CheckNoDatabase(PyObject* _self) { return true; }
+
+static bool PyUpb_DescriptorPool_LoadDependentFiles(
+    PyUpb_DescriptorPool* self, google_protobuf_FileDescriptorProto* proto) {
+  size_t n;
+  const upb_StringView* deps =
+      google_protobuf_FileDescriptorProto_dependency(proto, &n);
+  for (size_t i = 0; i < n; i++) {
+    const upb_FileDef* dep = upb_DefPool_FindFileByNameWithSize(
+        self->symtab, deps[i].data, deps[i].size);
+    if (!dep) {
+      PyObject* filename =
+          PyUnicode_FromStringAndSize(deps[i].data, deps[i].size);
+      if (!filename) return false;
+      bool ok = PyUpb_DescriptorPool_TryLoadFilename(self, filename);
+      Py_DECREF(filename);
+      if (!ok) return false;
+    }
+  }
+  return true;
+}
+
+static PyObject* PyUpb_DescriptorPool_DoAddSerializedFile(
     PyObject* _self, PyObject* serialized_pb) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
-  char* buf;
-  Py_ssize_t size;
-  upb_arena* arena = upb_arena_new();
+  upb_Arena* arena = upb_Arena_New();
   if (!arena) PYUPB_RETURN_OOM;
   PyObject* result = NULL;
 
-  if (self->db) {
-    PyErr_SetString(
-        PyExc_ValueError,
-        "Cannot call Add on a DescriptorPool that uses a DescriptorDatabase. "
-        "Add your file to the underlying database.");
-    goto done;
-  }
-
+  char* buf;
+  Py_ssize_t size;
   if (PyBytes_AsStringAndSize(serialized_pb, &buf, &size) < 0) {
     goto done;
   }
@@ -146,35 +203,102 @@ static PyObject* PyUpb_DescriptorPool_AddSerializedFile(
     goto done;
   }
 
-  upb_status status;
-  upb_status_clear(&status);
+  upb_StringView name = google_protobuf_FileDescriptorProto_name(proto);
+  const upb_FileDef* file =
+      upb_DefPool_FindFileByNameWithSize(self->symtab, name.data, name.size);
 
-  const upb_filedef* filedef = upb_symtab_addfile(self->symtab, proto, &status);
+  if (file) {
+    // If the existing file is equal to the new file, then silently ignore the
+    // duplicate add.
+    google_protobuf_FileDescriptorProto* existing =
+        upb_FileDef_ToProto(file, arena);
+    if (!existing) {
+      PyErr_SetNone(PyExc_MemoryError);
+      goto done;
+    }
+    const upb_MessageDef* m = PyUpb_DescriptorPool_GetFileProtoDef();
+    if (PyUpb_Message_IsEqual(proto, existing, m)) {
+      Py_INCREF(Py_None);
+      result = Py_None;
+      goto done;
+    }
+  }
+
+  if (self->db) {
+    if (!PyUpb_DescriptorPool_LoadDependentFiles(self, proto)) goto done;
+  }
+
+  upb_Status status;
+  upb_Status_Clear(&status);
+
+  const upb_FileDef* filedef =
+      upb_DefPool_AddFile(self->symtab, proto, &status);
   if (!filedef) {
     PyErr_Format(PyExc_TypeError,
                  "Couldn't build proto file into descriptor pool: %s",
-                 upb_status_errmsg(&status));
+                 upb_Status_ErrorMessage(&status));
     goto done;
   }
 
   result = PyUpb_FileDescriptor_Get(filedef);
 
 done:
-  upb_arena_free(arena);
+  upb_Arena_Free(arena);
   return result;
 }
 
-static PyObject* PyUpb_DescriptorPool_Add(PyObject* _self,
-                                          PyObject* file_desc) {
+static PyObject* PyUpb_DescriptorPool_DoAdd(PyObject* _self,
+                                            PyObject* file_desc) {
+  if (!PyUpb_CMessage_Verify(file_desc)) return NULL;
+  const upb_MessageDef* m = PyUpb_CMessage_GetMsgdef(file_desc);
+  const char* file_proto_name =
+      PYUPB_DESCRIPTOR_PROTO_PACKAGE ".FileDescriptorProto";
+  if (strcmp(upb_MessageDef_FullName(m), file_proto_name) != 0) {
+    return PyErr_Format(PyExc_TypeError, "Can only add FileDescriptorProto");
+  }
   PyObject* subargs = PyTuple_New(0);
-  // TODO: check file_desc type more.
+  if (!subargs) return NULL;
   PyObject* serialized =
       PyUpb_CMessage_SerializeToString(file_desc, subargs, NULL);
   Py_DECREF(subargs);
   if (!serialized) return NULL;
-  PyObject* ret = PyUpb_DescriptorPool_AddSerializedFile(_self, serialized);
+  PyObject* ret = PyUpb_DescriptorPool_DoAddSerializedFile(_self, serialized);
   Py_DECREF(serialized);
   return ret;
+}
+
+/*
+ * PyUpb_DescriptorPool_AddSerializedFile()
+ *
+ * Implements:
+ *   DescriptorPool.AddSerializedFile(self, serialized_file_descriptor)
+ *
+ * Adds the given serialized FileDescriptorProto to the pool.
+ */
+static PyObject* PyUpb_DescriptorPool_AddSerializedFile(
+    PyObject* _self, PyObject* serialized_pb) {
+  PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
+  if (self->db) {
+    PyErr_SetString(
+        PyExc_ValueError,
+        "Cannot call AddSerializedFile on a DescriptorPool that uses a "
+        "DescriptorDatabase. Add your file to the underlying database.");
+    return false;
+  }
+  return PyUpb_DescriptorPool_DoAddSerializedFile(_self, serialized_pb);
+}
+
+static PyObject* PyUpb_DescriptorPool_Add(PyObject* _self,
+                                          PyObject* file_desc) {
+  PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
+  if (self->db) {
+    PyErr_SetString(
+        PyExc_ValueError,
+        "Cannot call Add on a DescriptorPool that uses a DescriptorDatabase. "
+        "Add your file to the underlying database.");
+    return false;
+  }
+  return PyUpb_DescriptorPool_DoAdd(_self, file_desc);
 }
 
 /*
@@ -187,10 +311,14 @@ static PyObject* PyUpb_DescriptorPool_FindFileByName(PyObject* _self,
                                                      PyObject* arg) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
 
-  const char* name = PyUpb_GetStrData(arg);
+  const char* name = PyUpb_VerifyStrData(arg);
   if (!name) return NULL;
 
-  const upb_filedef* file = upb_symtab_lookupfile(self->symtab, name);
+  const upb_FileDef* file = upb_DefPool_FindFileByName(self->symtab, name);
+  if (file == NULL && self->db) {
+    if (!PyUpb_DescriptorPool_TryLoadFilename(self, arg)) return NULL;
+    file = upb_DefPool_FindFileByName(self->symtab, name);
+  }
   if (file == NULL) {
     return PyErr_Format(PyExc_KeyError, "Couldn't find file %.200s", name);
   }
@@ -208,10 +336,15 @@ static PyObject* PyUpb_DescriptorPool_FindExtensionByName(PyObject* _self,
                                                           PyObject* arg) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
 
-  const char* name = PyUpb_GetStrData(arg);
+  const char* name = PyUpb_VerifyStrData(arg);
   if (!name) return NULL;
 
-  const upb_fielddef* field = upb_symtab_lookupext(self->symtab, name);
+  const upb_FieldDef* field =
+      upb_DefPool_FindExtensionByName(self->symtab, name);
+  if (field == NULL && self->db) {
+    if (!PyUpb_DescriptorPool_TryLoadSymbol(self, arg)) return NULL;
+    field = upb_DefPool_FindExtensionByName(self->symtab, name);
+  }
   if (field == NULL) {
     return PyErr_Format(PyExc_KeyError, "Couldn't find extension %.200s", name);
   }
@@ -229,10 +362,14 @@ static PyObject* PyUpb_DescriptorPool_FindMessageTypeByName(PyObject* _self,
                                                             PyObject* arg) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
 
-  const char* name = PyUpb_GetStrData(arg);
+  const char* name = PyUpb_VerifyStrData(arg);
   if (!name) return NULL;
 
-  const upb_msgdef* m = upb_symtab_lookupmsg(self->symtab, name);
+  const upb_MessageDef* m = upb_DefPool_FindMessageByName(self->symtab, name);
+  if (m == NULL && self->db) {
+    if (!PyUpb_DescriptorPool_TryLoadSymbol(self, arg)) return NULL;
+    m = upb_DefPool_FindMessageByName(self->symtab, name);
+  }
   if (m == NULL) {
     return PyErr_Format(PyExc_KeyError, "Couldn't find message %.200s", name);
   }
@@ -261,23 +398,22 @@ static PyObject* PyUpb_DescriptorPool_FindFieldByName(PyObject* _self,
                                                       PyObject* arg) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
 
-  const char* name = PyUpb_GetStrData(arg);
+  const char* name = PyUpb_VerifyStrData(arg);
   if (!name) return NULL;
 
-  // First lookup as extension.
-  const upb_fielddef* f = upb_symtab_lookupext(self->symtab, name);
-
-  if (!f) {
-    // Otherwise look for a normal field.
-    size_t parent_size;
-    const char* child =
-        PyUpb_DescriptorPool_SplitSymbolName(name, &parent_size);
-    if (child) {
-      const upb_msgdef* parent =
-          upb_symtab_lookupmsg2(self->symtab, name, parent_size);
-      if (parent) {
-        f = upb_msgdef_ntofz(parent, child);
-      }
+  size_t parent_size;
+  const char* child = PyUpb_DescriptorPool_SplitSymbolName(name, &parent_size);
+  const upb_FieldDef* f = NULL;
+  if (child) {
+    const upb_MessageDef* parent =
+        upb_DefPool_FindMessageByNameWithSize(self->symtab, name, parent_size);
+    if (parent == NULL && self->db) {
+      if (!PyUpb_DescriptorPool_TryLoadSymbol(self, arg)) return NULL;
+      parent = upb_DefPool_FindMessageByNameWithSize(self->symtab, name,
+                                                     parent_size);
+    }
+    if (parent) {
+      f = upb_MessageDef_FindFieldByName(parent, child);
     }
   }
 
@@ -298,10 +434,14 @@ static PyObject* PyUpb_DescriptorPool_FindEnumTypeByName(PyObject* _self,
                                                          PyObject* arg) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
 
-  const char* name = PyUpb_GetStrData(arg);
+  const char* name = PyUpb_VerifyStrData(arg);
   if (!name) return NULL;
 
-  const upb_enumdef* e = upb_symtab_lookupenum(self->symtab, name);
+  const upb_EnumDef* e = upb_DefPool_FindEnumByName(self->symtab, name);
+  if (e == NULL && self->db) {
+    if (!PyUpb_DescriptorPool_TryLoadSymbol(self, arg)) return NULL;
+    e = upb_DefPool_FindEnumByName(self->symtab, name);
+  }
   if (e == NULL) {
     return PyErr_Format(PyExc_KeyError, "Couldn't find enum %.200s", name);
   }
@@ -319,47 +459,87 @@ static PyObject* PyUpb_DescriptorPool_FindOneofByName(PyObject* _self,
                                                       PyObject* arg) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
 
-  const char* name = PyUpb_GetStrData(arg);
+  const char* name = PyUpb_VerifyStrData(arg);
   if (!name) return NULL;
 
   size_t parent_size;
   const char* child = PyUpb_DescriptorPool_SplitSymbolName(name, &parent_size);
 
   if (child) {
-    const upb_msgdef* parent =
-        upb_symtab_lookupmsg2(self->symtab, name, parent_size);
+    const upb_MessageDef* parent =
+        upb_DefPool_FindMessageByNameWithSize(self->symtab, name, parent_size);
+    if (parent == NULL && self->db) {
+      if (!PyUpb_DescriptorPool_TryLoadSymbol(self, arg)) return NULL;
+      parent = upb_DefPool_FindMessageByNameWithSize(self->symtab, name,
+                                                     parent_size);
+    }
     if (parent) {
-      const upb_oneofdef* o = upb_msgdef_ntooz(parent, child);
+      const upb_OneofDef* o = upb_MessageDef_FindOneofByName(parent, child);
       return PyUpb_OneofDescriptor_Get(o);
     }
   }
 
-  return PyErr_Format(PyExc_KeyError, "Couldn't find enum %.200s", name);
+  return PyErr_Format(PyExc_KeyError, "Couldn't find oneof %.200s", name);
 }
 
 static PyObject* PyUpb_DescriptorPool_FindServiceByName(PyObject* _self,
                                                         PyObject* arg) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
 
-  const char* name = PyUpb_GetStrData(arg);
+  const char* name = PyUpb_VerifyStrData(arg);
   if (!name) return NULL;
 
-  const upb_servicedef* s = upb_symtab_lookupservice(self->symtab, name);
+  const upb_ServiceDef* s = upb_DefPool_FindServiceByName(self->symtab, name);
+  if (s == NULL && self->db) {
+    if (!PyUpb_DescriptorPool_TryLoadSymbol(self, arg)) return NULL;
+    s = upb_DefPool_FindServiceByName(self->symtab, name);
+  }
   if (s == NULL) {
-    return PyErr_Format(PyExc_KeyError, "Couldn't find enum %.200s", name);
+    return PyErr_Format(PyExc_KeyError, "Couldn't find service %.200s", name);
   }
 
   return PyUpb_ServiceDescriptor_Get(s);
+}
+
+static PyObject* PyUpb_DescriptorPool_FindMethodByName(PyObject* _self,
+                                                       PyObject* arg) {
+  PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
+
+  const char* name = PyUpb_VerifyStrData(arg);
+  if (!name) return NULL;
+  size_t parent_size;
+  const char* child = PyUpb_DescriptorPool_SplitSymbolName(name, &parent_size);
+
+  if (!child) goto err;
+  const upb_ServiceDef* parent =
+      upb_DefPool_FindServiceByNameWithSize(self->symtab, name, parent_size);
+  if (parent == NULL && self->db) {
+    if (!PyUpb_DescriptorPool_TryLoadSymbol(self, arg)) return NULL;
+    parent =
+        upb_DefPool_FindServiceByNameWithSize(self->symtab, name, parent_size);
+  }
+  if (!parent) goto err;
+  const upb_MethodDef* m = upb_ServiceDef_FindMethodByName(parent, child);
+  if (!m) goto err;
+  return PyUpb_MethodDescriptor_Get(m);
+
+err:
+  return PyErr_Format(PyExc_KeyError, "Couldn't find method %.200s", name);
 }
 
 static PyObject* PyUpb_DescriptorPool_FindFileContainingSymbol(PyObject* _self,
                                                                PyObject* arg) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
 
-  const char* name = PyUpb_GetStrData(arg);
+  const char* name = PyUpb_VerifyStrData(arg);
   if (!name) return NULL;
 
-  const upb_filedef* f = upb_symtab_lookupfileforsym(self->symtab, name);
+  const upb_FileDef* f =
+      upb_DefPool_FindFileContainingSymbol(self->symtab, name);
+  if (f == NULL && self->db) {
+    if (!PyUpb_DescriptorPool_TryLoadSymbol(self, arg)) return NULL;
+    f = upb_DefPool_FindFileContainingSymbol(self->symtab, name);
+  }
   if (f == NULL) {
     return PyErr_Format(PyExc_KeyError, "Couldn't find symbol %.200s", name);
   }
@@ -376,7 +556,7 @@ static PyObject* PyUpb_DescriptorPool_FindExtensionByNumber(PyObject* _self,
     return NULL;
   }
 
-  const upb_fielddef* f = upb_symtab_lookupextbynum(
+  const upb_FieldDef* f = upb_DefPool_FindExtensionByNumber(
       self->symtab, PyUpb_Descriptor_GetDef(message_descriptor), number);
   if (f == NULL) {
     return PyErr_Format(PyExc_KeyError, "Couldn't find Extension %d", number);
@@ -388,15 +568,22 @@ static PyObject* PyUpb_DescriptorPool_FindExtensionByNumber(PyObject* _self,
 static PyObject* PyUpb_DescriptorPool_FindAllExtensions(PyObject* _self,
                                                         PyObject* msg_desc) {
   PyUpb_DescriptorPool* self = (PyUpb_DescriptorPool*)_self;
-  const upb_msgdef* m = PyUpb_Descriptor_GetDef(msg_desc);
+  const upb_MessageDef* m = PyUpb_Descriptor_GetDef(msg_desc);
   size_t n;
-  const upb_fielddef** ext = upb_symtab_getallexts(self->symtab, m, &n);
+  const upb_FieldDef** ext = upb_DefPool_GetAllExtensions(self->symtab, m, &n);
   PyObject* ret = PyList_New(n);
+  if (!ret) goto done;
   for (size_t i = 0; i < n; i++) {
     PyObject* field = PyUpb_FieldDescriptor_Get(ext[i]);
-    if (!field) return NULL;
+    if (!field) {
+      Py_DECREF(ret);
+      ret = NULL;
+      goto done;
+    }
     PyList_SetItem(ret, i, field);
   }
+done:
+  free(ext);
   return ret;
 }
 
@@ -419,8 +606,8 @@ static PyMethodDef PyUpb_DescriptorPool_Methods[] = {
      "Searches for oneof descriptor by full name."},
     {"FindServiceByName", PyUpb_DescriptorPool_FindServiceByName, METH_O,
      "Searches for service descriptor by full name."},
-    //{ "Find, PyUpb_DescriptorPool_Find, METH_O,
-    //  "Searches for method descriptor by full name." },
+    {"FindMethodByName", PyUpb_DescriptorPool_FindMethodByName, METH_O,
+     "Searches for method descriptor by full name."},
     {"FindFileContainingSymbol", PyUpb_DescriptorPool_FindFileContainingSymbol,
      METH_O, "Gets the FileDescriptor containing the specified symbol."},
     {"FindExtensionByNumber", PyUpb_DescriptorPool_FindExtensionByNumber,

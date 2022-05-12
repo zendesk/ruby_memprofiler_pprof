@@ -29,15 +29,16 @@
 
 import unittest
 from google.protobuf.pyext import _message
-from google.protobuf.internal import api_implementation
+from google3.net.proto2.python.internal import api_implementation
 from google.protobuf import unittest_pb2
 from google.protobuf import map_unittest_pb2
 from google.protobuf import descriptor_pool
 from google.protobuf import text_format
 from google.protobuf import message_factory
 from google.protobuf import message
-from google.protobuf.internal import factory_test1_pb2
-from google.protobuf.internal import factory_test2_pb2
+from google3.net.proto2.python.internal import factory_test1_pb2
+from google3.net.proto2.python.internal import factory_test2_pb2
+from google3.net.proto2.python.internal import more_extensions_pb2
 from google.protobuf import descriptor_pb2
 
 class TestMessageExtension(unittest.TestCase):
@@ -112,7 +113,10 @@ class TestMessageExtension(unittest.TestCase):
         int32_array.append(123)
         self.assertEqual(0, msg.ByteSize())
 
-#TestMessageExtension.test_descriptor_pool.__unittest_expecting_failure__ = True
+    def testFloatPrinting(self):
+        message = unittest_pb2.TestAllTypes()
+        message.optional_float = -0.0
+        self.assertEqual(str(message), 'optional_float: -0\n')
 
 class OversizeProtosTest(unittest.TestCase):
   def setUp(self):
@@ -136,6 +140,44 @@ class OversizeProtosTest(unittest.TestCase):
     SetAllowOversizeProtos(True)
     q = unittest_pb2.NestedTestAllTypes()
     q.ParseFromString(self.p_serialized)
+
+  def testExtensionIter(self):
+    extendee_proto = more_extensions_pb2.ExtendedMessage()
+
+    extension_int32 = more_extensions_pb2.optional_int_extension
+    extendee_proto.Extensions[extension_int32] = 23
+
+    extension_repeated = more_extensions_pb2.repeated_int_extension
+    extendee_proto.Extensions[extension_repeated].append(11)
+
+    extension_msg = more_extensions_pb2.optional_message_extension
+    extendee_proto.Extensions[extension_msg].foreign_message_int = 56
+
+    # Set some normal fields.
+    extendee_proto.optional_int32 = 1
+    extendee_proto.repeated_string.append('hi')
+
+    expected = {
+        extension_int32: True,
+        extension_msg: True,
+        extension_repeated: True
+    }
+    count = 0
+    for item in extendee_proto.Extensions:
+      del expected[item]
+      self.assertIn(item, extendee_proto.Extensions)
+      count += 1
+    self.assertEqual(count, 3)
+    self.assertEqual(len(expected), 0)
+  
+  def testIsInitializedStub(self):
+    proto = unittest_pb2.TestRequiredForeign()
+    self.assertTrue(proto.IsInitialized())
+    self.assertFalse(proto.optional_message.IsInitialized())
+    errors = []
+    self.assertFalse(proto.optional_message.IsInitialized(errors))
+    self.assertEqual(['a', 'b', 'c'], errors)
+    self.assertRaises(message.EncodeError, proto.optional_message.SerializeToString)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

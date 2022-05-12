@@ -23,48 +23,23 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from google.protobuf.internal import descriptor_pool_test
 import unittest
-import copy
+from google.protobuf.internal.descriptor_pool_test import *
 
-print(unittest)
+# This is testing that certain methods unconditionally throw TypeError.
+# In the new extension we simply don't define them at all.
+AddDescriptorTest.testAddTypeError.__unittest_expecting_failure__ = True
 
-descriptor_pool_test.AddDescriptorTest.testAddTypeError.__unittest_expecting_failure__ = True
-descriptor_pool_test.AddDescriptorTest.testEnum.__unittest_expecting_failure__ = True
-descriptor_pool_test.AddDescriptorTest.testFile.__unittest_expecting_failure__ = True
-descriptor_pool_test.AddDescriptorTest.testMessage.__unittest_expecting_failure__ = True
-descriptor_pool_test.AddDescriptorTest.testService.__unittest_expecting_failure__ = True
-descriptor_pool_test.CreateDescriptorPoolTest.testFindFieldByName.__unittest_expecting_failure__ = True
-descriptor_pool_test.CreateDescriptorPoolTest.testFindMessageTypeByName.__unittest_expecting_failure__ = True
-descriptor_pool_test.CreateDescriptorPoolTest.testFindService.__unittest_expecting_failure__ = True
-descriptor_pool_test.CreateDescriptorPoolTest.testFindTypeErrors.__unittest_expecting_failure__ = True
-descriptor_pool_test.CreateDescriptorPoolTest.testUserDefinedDB.__unittest_expecting_failure__ = True
-descriptor_pool_test.SecondaryDescriptorFromDescriptorDB.testErrorCollector.__unittest_expecting_failure__ = True
+SecondaryDescriptorFromDescriptorDB.testErrorCollector.__unittest_expecting_failure__ = True
 
-# Some tests are defined in a base class and inherited by multiple sub-classes.
-# If only some of the subclasses fail, we need to duplicate the test method
-# before marking it, otherwise the mark will affect all subclasses.
-def wrap(cls, method):
-  existing = getattr(cls, method)
-  setattr(cls, method, lambda self: existing(self))
-  getattr(cls, method).__unittest_expecting_failure__ = True
-
-wrap(descriptor_pool_test.CreateDescriptorPoolTest, "testAddFileDescriptor")
-wrap(descriptor_pool_test.CreateDescriptorPoolTest, "testAddSerializedFile")
-wrap(descriptor_pool_test.CreateDescriptorPoolTest, "testComplexNesting")
-wrap(descriptor_pool_test.CreateDescriptorPoolTest, "testExtensionsAreNotFields")
-wrap(descriptor_pool_test.DefaultDescriptorPoolTest, "testAddFileDescriptor")
-wrap(descriptor_pool_test.DefaultDescriptorPoolTest, "testAddSerializedFile")
-wrap(descriptor_pool_test.DefaultDescriptorPoolTest, "testComplexNesting")
-wrap(descriptor_pool_test.DefaultDescriptorPoolTest, "testEnumDefaultValue")
-wrap(descriptor_pool_test.DefaultDescriptorPoolTest, "testExtensionsAreNotFields")
-wrap(descriptor_pool_test.SecondaryDescriptorFromDescriptorDB, "testFindAllExtensions")
-wrap(descriptor_pool_test.SecondaryDescriptorFromDescriptorDB, "testFindEnumTypeByName")
-wrap(descriptor_pool_test.SecondaryDescriptorFromDescriptorDB, "testFindExtensionByName")
-wrap(descriptor_pool_test.SecondaryDescriptorFromDescriptorDB, "testFindExtensionByNumber")
-wrap(descriptor_pool_test.SecondaryDescriptorFromDescriptorDB, "testFindFileByName")
-wrap(descriptor_pool_test.SecondaryDescriptorFromDescriptorDB, "testFindFileContainingSymbol")
-wrap(descriptor_pool_test.SecondaryDescriptorFromDescriptorDB, "testFindOneofByName")
-
+# begin:github_only
 if __name__ == '__main__':
-  unittest.main(module=descriptor_pool_test, verbosity=2)
+  unittest.main(verbosity=2)
+# end:github_only
+
+# begin:google_only
+# CreateDescriptorPoolTest.testComplexNestingWithProtoFileParser.__unittest_expecting_failure__ = True
+# from absl import app
+# if __name__ == '__main__':
+#   app.run(lambda argv: unittest.main(verbosity=2))
+# end:google_only

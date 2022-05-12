@@ -23,36 +23,24 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from google.protobuf.internal import descriptor_test
+from google.protobuf.internal.descriptor_test import *
 import unittest
 
-descriptor_test.DescriptorCopyToProtoTest.testCopyToProto_TypeError.__unittest_expecting_failure__ = True
-descriptor_test.GeneratedDescriptorTest.testDescriptor.__unittest_expecting_failure__ = True
-descriptor_test.MakeDescriptorTest.testCamelcaseName.__unittest_expecting_failure__ = True
-descriptor_test.MakeDescriptorTest.testJsonName.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testAggregateOptions.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testComplexExtensionOptions.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testContainingServiceFixups.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testContainingTypeFixups.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testCustomOptionsCopyTo.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testDefault.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testDifferentCustomOptionTypes.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testEnumFixups.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testEnumValueName.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testFileDescriptor.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testFileDescriptorReferences.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testGetOptions.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testImmutableCppDescriptor.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testNestedOptions.__unittest_expecting_failure__ = True
-descriptor_test.NewDescriptorTest.testSimpleCustomOptions.__unittest_expecting_failure__ = True
+# Our behavior here matches pure-Python, which does not allow
+# foo.enum_values_by_name.get([]).  We reject it because we return a true
+# dict (like pure Python), which does not allow hashing by a list.
+GeneratedDescriptorTest.testDescriptor.__unittest_expecting_failure__ = True
 
-# We must skip these tests entirely (rather than running them with
-# __unittest_expecting_failure__) because they error out in setUp():
-#
-#  TypeError: Couldn't build proto file into descriptor pool: duplicate file name (some/filename/some.proto)
-#
-# TODO: change to __unittest_expecting_failure__ when we have some solution for duplicated filenames
-descriptor_test.DescriptorTest.__unittest_skip__ = True
+# These fail because they attempt to add fields with conflicting JSON names.
+# We don't want to support this going forward.
+MakeDescriptorTest.testCamelcaseName.__unittest_expecting_failure__ = True
+MakeDescriptorTest.testJsonName.__unittest_expecting_failure__ = True
+
+# We pass this test, but the error message is slightly different.
+# Our error message is better.
+NewDescriptorTest.testImmutableCppDescriptor.__unittest_expecting_failure__ = True
+
+DescriptorTest.testGetDebugString.__unittest_expecting_failure__ = True
 
 if __name__ == '__main__':
-  unittest.main(module=descriptor_test, verbosity=2)
+  unittest.main(verbosity=2)

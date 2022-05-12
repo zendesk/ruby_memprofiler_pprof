@@ -23,13 +23,157 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-load(
-    "//bazel:build_defs.bzl",
-    "UPB_DEFAULT_COPTS",
+# begin:github_only
+load("//python:py_extension.bzl", "py_extension")
+# end:github_only
+
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
+load("//bazel:build_defs.bzl", "UPB_DEFAULT_COPTS")
+
+licenses(["notice"])
+
+package(
+    default_visibility = ["//python/dist:__pkg__"],
 )
 
-cc_binary(
-    name = "message",
+LIMITED_API_FLAG_SELECT = {
+    ":limited_api_3.7": ["-DPy_LIMITED_API=0x03070000"],
+    ":limited_api_3.10": ["-DPy_LIMITED_API=0x030a0000"],
+    "//conditions:default": [],
+}
+
+bool_flag(
+    name = "limited_api",
+    build_setting_default = False,
+)
+
+string_flag(
+    name = "python_version",
+    build_setting_default = "system",
+    values = [
+        "system",
+        "37",
+        "38",
+        "39",
+        "310",
+    ],
+)
+
+config_setting(
+    name = "limited_api_3.7",
+    flag_values = {
+        ":limited_api": "True",
+        ":python_version": "37",
+    },
+)
+
+config_setting(
+    name = "full_api_3.7_win32",
+    flag_values = {
+        ":limited_api": "False",
+        ":python_version": "37",
+    },
+    values = {"cpu": "win32"},
+)
+
+config_setting(
+    name = "full_api_3.7_win64",
+    flag_values = {
+        ":limited_api": "False",
+        ":python_version": "37",
+    },
+    values = {"cpu": "win64"},
+)
+
+selects.config_setting_group(
+    name = "full_api_3.7",
+    match_any = [
+        ":full_api_3.7_win32",
+        ":full_api_3.7_win64",
+    ],
+)
+
+config_setting(
+    name = "full_api_3.8_win32",
+    flag_values = {
+        ":limited_api": "False",
+        ":python_version": "38",
+    },
+    values = {"cpu": "win32"},
+)
+
+config_setting(
+    name = "full_api_3.8_win64",
+    flag_values = {
+        ":limited_api": "False",
+        ":python_version": "38",
+    },
+    values = {"cpu": "win64"},
+)
+
+selects.config_setting_group(
+    name = "full_api_3.8",
+    match_any = [
+        ":full_api_3.8_win32",
+        ":full_api_3.8_win64",
+    ],
+)
+
+config_setting(
+    name = "full_api_3.9_win32",
+    flag_values = {
+        ":limited_api": "False",
+        ":python_version": "39",
+    },
+    values = {"cpu": "win32"},
+)
+
+config_setting(
+    name = "full_api_3.9_win64",
+    flag_values = {
+        ":limited_api": "False",
+        ":python_version": "39",
+    },
+    values = {"cpu": "win64"},
+)
+
+selects.config_setting_group(
+    name = "full_api_3.9",
+    match_any = [
+        "full_api_3.9_win32",
+        ":full_api_3.9_win64",
+    ],
+)
+
+config_setting(
+    name = "limited_api_3.10_win32",
+    flag_values = {
+        ":limited_api": "True",
+        ":python_version": "310",
+    },
+    values = {"cpu": "win32"},
+)
+
+config_setting(
+    name = "limited_api_3.10_win64",
+    flag_values = {
+        ":limited_api": "True",
+        ":python_version": "310",
+    },
+    values = {"cpu": "win64"},
+)
+
+selects.config_setting_group(
+    name = "limited_api_3.10",
+    match_any = [
+        ":limited_api_3.10_win32",
+        ":limited_api_3.10_win64",
+    ],
+)
+
+py_extension(
+    name = "_message",
     srcs = [
         "convert.c",
         "convert.h",
@@ -47,87 +191,26 @@ cc_binary(
         "message.h",
         "protobuf.c",
         "protobuf.h",
-        "python.h",
+        "python_api.h",
         "repeated.c",
         "repeated.h",
+        "unknown_fields.c",
+        "unknown_fields.h",
     ],
-    copts = UPB_DEFAULT_COPTS + [
+    copts = UPB_DEFAULT_COPTS + select(LIMITED_API_FLAG_SELECT) + [
         # The Python API requires patterns that are ISO C incompatible, like
         # casts between function pointers and object pointers.
         "-Wno-pedantic",
     ],
-    # We use a linker script to hide all symbols except the entry point for
-    # the module.
-    linkopts = select({
-        "@platforms//os:linux": ["-Wl,--version-script,$(location :version_script.lds)"],
-        "@platforms//os:macos": ["-Wl,-exported_symbol", "-Wl,_PyInit__message"],
-    }),
-    linkshared = True,
-    linkstatic = True,
     deps = [
-        ":version_script.lds",
+        "//:collections",
+        "//:descriptor_upb_proto_reflection",
         "//:reflection",
+        "//:table",
         "//:textformat",
         "//:upb",
         "//upb/util:compare",
         "//upb/util:def_to_proto",
         "//upb/util:required_fields",
-        "@system_python//:python_headers",
     ],
-)
-
-cc_binary(
-    name = "api_implementation",
-    srcs = [
-        "api_implementation.c",
-    ],
-    # Enable once linker script is available.
-    #copts = ["-fvisibility=hidden"],
-    deps = ["@system_python//:python_headers"],
-    linkshared = True,
-    linkstatic = True,
-)
-
-# Copy the extensions into the location recognized by Python.
-# .abi3.so indicates use of the limited API, and cross-version ABI compatibility.
-EXT_SUFFIX = ".abi3.so"
-
-genrule(
-    name = "copy_message",
-    srcs = [":message"],
-    outs = ["google/protobuf/pyext/_message" + EXT_SUFFIX],
-    cmd = "cp $< $@",
-)
-
-genrule(
-    name = "copy_api_implementation",
-    srcs = [":api_implementation"],
-    outs = ["google/protobuf/internal/_api_implementation" + EXT_SUFFIX],
-    cmd = "cp $< $@",
-    visibility = ["//python:__subpackages__"],
-)
-
-py_library(
-    name = "message_ext",
-    data = [
-        "google/protobuf/pyext/_message" + EXT_SUFFIX,
-        "google/protobuf/internal/_api_implementation" + EXT_SUFFIX,
-    ],
-    imports = ["."],
-    visibility = ["//python:__subpackages__"],
-)
-
-py_test(
-    name = "minimal_test",
-    srcs = [
-        "minimal_test.py",
-    ],
-    deps = [
-        "//python:message_ext",
-        "@com_google_protobuf//:python_srcs",
-        "@com_google_protobuf//:python_common_test_protos",
-        "@com_google_protobuf//:python_specific_test_protos",
-    ],
-    imports = ["."],
-    legacy_create_init = False,
 )
