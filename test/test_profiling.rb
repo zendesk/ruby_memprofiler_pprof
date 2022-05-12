@@ -206,24 +206,30 @@ describe MemprofilerPprof::Collector do
   end
 
   it 'captures backtraces for retained objects' do
-    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-
-    $leaky_bucket = []
-    def leak_into_bucket
-      $leaky_bucket << SecureRandom.hex(20)
+    $bucket = []
+    def leak_into_bucket_1
+      $bucket << SecureRandom.hex(20)
+    end
+    def leak_into_bucket_2
+      $bucket << SecureRandom.hex(20)
     end
 
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
+
     c.start!
-    1000.times { leak_into_bucket }
+    1000.times { leak_into_bucket_1 }
     profile_1 = DecodedProfileData.new c.flush
+    1000.times { leak_into_bucket_2 }
     profile_2 = DecodedProfileData.new c.flush
-    $leaky_bucket = nil
+    $bucket = []
+    1000.times { leak_into_bucket_2 }
     10.times { GC.start }
+    # At this point, there _should_ be no more objects allocated by leak_into_bucket_1
     profile_3 = DecodedProfileData.new c.flush
     c.stop!
 
-    assert_operator profile_1.heap_samples_including_stack(['leak_into_bucket']).size, :>=, 1000
-    assert_operator profile_2.heap_samples_including_stack(['leak_into_bucket']).size, :>=, 1000
-    assert_operator profile_3.heap_samples_including_stack(['leak_into_bucket']).size, :<, 10
+    assert_operator profile_1.heap_samples_including_stack(['leak_into_bucket_1']).size, :>=, 1000
+    assert_operator profile_2.heap_samples_including_stack(['leak_into_bucket_1']).size, :>=, 1000
+    assert_operator profile_3.heap_samples_including_stack(['leak_into_bucket_1']).size, :<, 10
   end
 end
