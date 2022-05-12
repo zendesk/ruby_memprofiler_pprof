@@ -3,7 +3,7 @@ on: push
 jobs:
   test:
     name: test
-    runs-on: zendesk-stable
+    runs-on: ubuntu-20.04
     strategy:
       fail-fast: false
       matrix:
