@@ -19,7 +19,7 @@ static void *mpp_pprof_upb_arena_malloc(upb_alloc *alloc, void *ptr, size_t olds
 struct mpp_pprof_serctx *mpp_pprof_serctx_new() {
     struct mpp_pprof_serctx *ctx = mpp_xmalloc(sizeof(struct mpp_pprof_serctx));
     ctx->allocator.func = mpp_pprof_upb_arena_malloc;
-    ctx->arena = upb_arena_init(NULL, 0, &ctx->allocator);
+    ctx->arena = upb_Arena_Init(NULL, 0, &ctx->allocator);
     ctx->profile_proto = perftools_profiles_Profile_new(ctx->arena);
     ctx->strindex = NULL;
     return ctx;
@@ -29,7 +29,7 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new() {
 // are released, and any memory from its internal state is freed. *ctx itself is also
 // freed and must not be dereferenced after this.
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
-    upb_arena_free(ctx->arena);
+    upb_Arena_Free(ctx->arena);
     if (ctx->strindex) {
         mpp_strtab_index_destroy(ctx->strindex);
     }
@@ -120,10 +120,10 @@ int mpp_pprof_serctx_set_loctab(
     MPP_ASSERT_MSG(ctx->strindex, "mpp_strtab_index returned 0");
 
     // Set up the string table in the protobuf
-    upb_strview *stringtab_list_proto =
+    upb_StringView *stringtab_list_proto =
         perftools_profiles_Profile_resize_string_table(ctx->profile_proto, ctx->strindex->str_list_len, ctx->arena);
     for (int64_t i = 0; i < ctx->strindex->str_list_len; i++) {
-        upb_strview *stringtab_proto = &stringtab_list_proto[i];
+        upb_StringView *stringtab_proto = &stringtab_list_proto[i];
         struct mpp_strtab_el *intern_tab_el = ctx->strindex->str_list[i];
         stringtab_proto->data = intern_tab_el->str;
         stringtab_proto->size = intern_tab_el->str_len;
@@ -251,7 +251,7 @@ int mpp_pprof_serctx_serialize(
     strm.next_in = (unsigned char *)protobuf_data;
 
     const size_t out_chunk_size = 4096;
-    char *gzip_data = upb_arena_malloc(ctx->arena, out_chunk_size);
+    char *gzip_data = upb_Arena_Malloc(ctx->arena, out_chunk_size);
     size_t gzip_data_allocd_len = out_chunk_size;
     strm.avail_out = out_chunk_size;
     strm.next_out = (unsigned char *)gzip_data;
@@ -270,7 +270,7 @@ int mpp_pprof_serctx_serialize(
         if (strm.avail_out == 0) {
             size_t old_gzip_data_allocd_len = gzip_data_allocd_len;
             gzip_data_allocd_len += out_chunk_size;
-            gzip_data = upb_arena_realloc(ctx->arena, gzip_data, old_gzip_data_allocd_len, gzip_data_allocd_len);
+            gzip_data = upb_Arena_Realloc(ctx->arena, gzip_data, old_gzip_data_allocd_len, gzip_data_allocd_len);
             strm.avail_out = out_chunk_size;
             strm.next_out = (unsigned char *)(gzip_data + old_gzip_data_allocd_len);
         }

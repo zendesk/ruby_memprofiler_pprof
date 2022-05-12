@@ -12,140 +12,141 @@
 
 #include "upb/port_def.inc"
 
-static const upb_msglayout_sub perftools_profiles_Profile_submsgs[5] = {
-  {.submsg = &perftools_profiles_Function_msginit},
-  {.submsg = &perftools_profiles_Location_msginit},
-  {.submsg = &perftools_profiles_Mapping_msginit},
+static const upb_MiniTable_Sub perftools_profiles_Profile_submsgs[6] = {
+  {.submsg = &perftools_profiles_ValueType_msginit},
   {.submsg = &perftools_profiles_Sample_msginit},
+  {.submsg = &perftools_profiles_Mapping_msginit},
+  {.submsg = &perftools_profiles_Location_msginit},
+  {.submsg = &perftools_profiles_Function_msginit},
   {.submsg = &perftools_profiles_ValueType_msginit},
 };
 
-static const upb_msglayout_field perftools_profiles_Profile__fields[14] = {
-  {1, UPB_SIZE(60, 64), 0, 4, 11, _UPB_MODE_ARRAY | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {2, UPB_SIZE(64, 72), 0, 3, 11, _UPB_MODE_ARRAY | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {3, UPB_SIZE(68, 80), 0, 2, 11, _UPB_MODE_ARRAY | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {4, UPB_SIZE(72, 88), 0, 1, 11, _UPB_MODE_ARRAY | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {5, UPB_SIZE(76, 96), 0, 0, 11, _UPB_MODE_ARRAY | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {6, UPB_SIZE(80, 104), 0, 0, 9, _UPB_MODE_ARRAY | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {7, UPB_SIZE(8, 8), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {8, UPB_SIZE(16, 16), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {9, UPB_SIZE(24, 24), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {10, UPB_SIZE(32, 32), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {11, UPB_SIZE(56, 56), 1, 4, 11, _UPB_MODE_SCALAR | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {12, UPB_SIZE(40, 40), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {13, UPB_SIZE(84, 112), 0, 0, 3, _UPB_MODE_ARRAY | _UPB_MODE_IS_PACKED | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {14, UPB_SIZE(48, 48), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
+static const upb_MiniTable_Field perftools_profiles_Profile__fields[14] = {
+  {1, UPB_SIZE(4, 8), UPB_SIZE(0, 0), 0, 11, kUpb_FieldMode_Array | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {2, UPB_SIZE(8, 16), UPB_SIZE(0, 0), 1, 11, kUpb_FieldMode_Array | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {3, UPB_SIZE(12, 24), UPB_SIZE(0, 0), 2, 11, kUpb_FieldMode_Array | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {4, UPB_SIZE(16, 32), UPB_SIZE(0, 0), 3, 11, kUpb_FieldMode_Array | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {5, UPB_SIZE(20, 40), UPB_SIZE(0, 0), 4, 11, kUpb_FieldMode_Array | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {6, UPB_SIZE(24, 48), UPB_SIZE(0, 0), kUpb_NoSub, 9, kUpb_FieldMode_Array | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {7, UPB_SIZE(40, 72), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {8, UPB_SIZE(48, 80), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {9, UPB_SIZE(56, 88), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {10, UPB_SIZE(64, 96), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {11, UPB_SIZE(28, 56), UPB_SIZE(1, 1), 5, 11, kUpb_FieldMode_Scalar | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {12, UPB_SIZE(72, 104), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {13, UPB_SIZE(32, 64), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Array | kUpb_LabelFlags_IsPacked | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {14, UPB_SIZE(80, 112), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
 };
 
-const upb_msglayout perftools_profiles_Profile_msginit = {
+const upb_MiniTable perftools_profiles_Profile_msginit = {
   &perftools_profiles_Profile_submsgs[0],
   &perftools_profiles_Profile__fields[0],
-  UPB_SIZE(88, 120), 14, _UPB_MSGEXT_NONE, 14, 255, 0,
+  UPB_SIZE(88, 120), 14, kUpb_ExtMode_NonExtendable, 14, 255, 0,
 };
 
-static const upb_msglayout_field perftools_profiles_ValueType__fields[2] = {
-  {1, UPB_SIZE(0, 0), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {2, UPB_SIZE(8, 8), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
+static const upb_MiniTable_Field perftools_profiles_ValueType__fields[2] = {
+  {1, UPB_SIZE(0, 0), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {2, UPB_SIZE(8, 8), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
 };
 
-const upb_msglayout perftools_profiles_ValueType_msginit = {
+const upb_MiniTable perftools_profiles_ValueType_msginit = {
   NULL,
   &perftools_profiles_ValueType__fields[0],
-  UPB_SIZE(16, 16), 2, _UPB_MSGEXT_NONE, 2, 255, 0,
+  UPB_SIZE(16, 24), 2, kUpb_ExtMode_NonExtendable, 2, 255, 0,
 };
 
-static const upb_msglayout_sub perftools_profiles_Sample_submsgs[1] = {
+static const upb_MiniTable_Sub perftools_profiles_Sample_submsgs[1] = {
   {.submsg = &perftools_profiles_Label_msginit},
 };
 
-static const upb_msglayout_field perftools_profiles_Sample__fields[3] = {
-  {1, UPB_SIZE(0, 0), 0, 0, 4, _UPB_MODE_ARRAY | _UPB_MODE_IS_PACKED | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {2, UPB_SIZE(4, 8), 0, 0, 3, _UPB_MODE_ARRAY | _UPB_MODE_IS_PACKED | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {3, UPB_SIZE(8, 16), 0, 0, 11, _UPB_MODE_ARRAY | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
+static const upb_MiniTable_Field perftools_profiles_Sample__fields[3] = {
+  {1, UPB_SIZE(0, 0), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Array | kUpb_LabelFlags_IsPacked | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {2, UPB_SIZE(4, 8), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Array | kUpb_LabelFlags_IsPacked | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {3, UPB_SIZE(8, 16), UPB_SIZE(0, 0), 0, 11, kUpb_FieldMode_Array | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
 };
 
-const upb_msglayout perftools_profiles_Sample_msginit = {
+const upb_MiniTable perftools_profiles_Sample_msginit = {
   &perftools_profiles_Sample_submsgs[0],
   &perftools_profiles_Sample__fields[0],
-  UPB_SIZE(16, 24), 3, _UPB_MSGEXT_NONE, 3, 255, 0,
+  UPB_SIZE(12, 24), 3, kUpb_ExtMode_NonExtendable, 3, 255, 0,
 };
 
-static const upb_msglayout_field perftools_profiles_Label__fields[4] = {
-  {1, UPB_SIZE(0, 0), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {2, UPB_SIZE(8, 8), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {3, UPB_SIZE(16, 16), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {4, UPB_SIZE(24, 24), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
+static const upb_MiniTable_Field perftools_profiles_Label__fields[4] = {
+  {1, UPB_SIZE(0, 0), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {2, UPB_SIZE(8, 8), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {3, UPB_SIZE(16, 16), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {4, UPB_SIZE(24, 24), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
 };
 
-const upb_msglayout perftools_profiles_Label_msginit = {
+const upb_MiniTable perftools_profiles_Label_msginit = {
   NULL,
   &perftools_profiles_Label__fields[0],
-  UPB_SIZE(32, 32), 4, _UPB_MSGEXT_NONE, 4, 255, 0,
+  UPB_SIZE(32, 40), 4, kUpb_ExtMode_NonExtendable, 4, 255, 0,
 };
 
-static const upb_msglayout_field perftools_profiles_Mapping__fields[10] = {
-  {1, UPB_SIZE(0, 0), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {2, UPB_SIZE(8, 8), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {3, UPB_SIZE(16, 16), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {4, UPB_SIZE(24, 24), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {5, UPB_SIZE(32, 32), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {6, UPB_SIZE(40, 40), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {7, UPB_SIZE(48, 48), 0, 0, 8, _UPB_MODE_SCALAR | (_UPB_REP_1BYTE << _UPB_REP_SHIFT)},
-  {8, UPB_SIZE(49, 49), 0, 0, 8, _UPB_MODE_SCALAR | (_UPB_REP_1BYTE << _UPB_REP_SHIFT)},
-  {9, UPB_SIZE(50, 50), 0, 0, 8, _UPB_MODE_SCALAR | (_UPB_REP_1BYTE << _UPB_REP_SHIFT)},
-  {10, UPB_SIZE(51, 51), 0, 0, 8, _UPB_MODE_SCALAR | (_UPB_REP_1BYTE << _UPB_REP_SHIFT)},
+static const upb_MiniTable_Field perftools_profiles_Mapping__fields[10] = {
+  {1, UPB_SIZE(8, 8), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {2, UPB_SIZE(16, 16), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {3, UPB_SIZE(24, 24), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {4, UPB_SIZE(32, 32), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {5, UPB_SIZE(40, 40), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {6, UPB_SIZE(48, 48), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {7, UPB_SIZE(0, 0), UPB_SIZE(0, 0), kUpb_NoSub, 8, kUpb_FieldMode_Scalar | (kUpb_FieldRep_1Byte << kUpb_FieldRep_Shift)},
+  {8, UPB_SIZE(1, 1), UPB_SIZE(0, 0), kUpb_NoSub, 8, kUpb_FieldMode_Scalar | (kUpb_FieldRep_1Byte << kUpb_FieldRep_Shift)},
+  {9, UPB_SIZE(2, 2), UPB_SIZE(0, 0), kUpb_NoSub, 8, kUpb_FieldMode_Scalar | (kUpb_FieldRep_1Byte << kUpb_FieldRep_Shift)},
+  {10, UPB_SIZE(3, 3), UPB_SIZE(0, 0), kUpb_NoSub, 8, kUpb_FieldMode_Scalar | (kUpb_FieldRep_1Byte << kUpb_FieldRep_Shift)},
 };
 
-const upb_msglayout perftools_profiles_Mapping_msginit = {
+const upb_MiniTable perftools_profiles_Mapping_msginit = {
   NULL,
   &perftools_profiles_Mapping__fields[0],
-  UPB_SIZE(56, 56), 10, _UPB_MSGEXT_NONE, 10, 255, 0,
+  UPB_SIZE(56, 56), 10, kUpb_ExtMode_NonExtendable, 10, 255, 0,
 };
 
-static const upb_msglayout_sub perftools_profiles_Location_submsgs[1] = {
+static const upb_MiniTable_Sub perftools_profiles_Location_submsgs[1] = {
   {.submsg = &perftools_profiles_Line_msginit},
 };
 
-static const upb_msglayout_field perftools_profiles_Location__fields[5] = {
-  {1, UPB_SIZE(0, 0), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {2, UPB_SIZE(8, 8), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {3, UPB_SIZE(16, 16), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {4, UPB_SIZE(28, 32), 0, 0, 11, _UPB_MODE_ARRAY | (_UPB_REP_PTR << _UPB_REP_SHIFT)},
-  {5, UPB_SIZE(24, 24), 0, 0, 8, _UPB_MODE_SCALAR | (_UPB_REP_1BYTE << _UPB_REP_SHIFT)},
+static const upb_MiniTable_Field perftools_profiles_Location__fields[5] = {
+  {1, UPB_SIZE(8, 16), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {2, UPB_SIZE(16, 24), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {3, UPB_SIZE(24, 32), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {4, UPB_SIZE(4, 8), UPB_SIZE(0, 0), 0, 11, kUpb_FieldMode_Array | (kUpb_FieldRep_Pointer << kUpb_FieldRep_Shift)},
+  {5, UPB_SIZE(0, 0), UPB_SIZE(0, 0), kUpb_NoSub, 8, kUpb_FieldMode_Scalar | (kUpb_FieldRep_1Byte << kUpb_FieldRep_Shift)},
 };
 
-const upb_msglayout perftools_profiles_Location_msginit = {
+const upb_MiniTable perftools_profiles_Location_msginit = {
   &perftools_profiles_Location_submsgs[0],
   &perftools_profiles_Location__fields[0],
-  UPB_SIZE(32, 40), 5, _UPB_MSGEXT_NONE, 5, 255, 0,
+  UPB_SIZE(32, 40), 5, kUpb_ExtMode_NonExtendable, 5, 255, 0,
 };
 
-static const upb_msglayout_field perftools_profiles_Line__fields[2] = {
-  {1, UPB_SIZE(0, 0), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {2, UPB_SIZE(8, 8), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
+static const upb_MiniTable_Field perftools_profiles_Line__fields[2] = {
+  {1, UPB_SIZE(0, 0), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {2, UPB_SIZE(8, 8), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
 };
 
-const upb_msglayout perftools_profiles_Line_msginit = {
+const upb_MiniTable perftools_profiles_Line_msginit = {
   NULL,
   &perftools_profiles_Line__fields[0],
-  UPB_SIZE(16, 16), 2, _UPB_MSGEXT_NONE, 2, 255, 0,
+  UPB_SIZE(16, 24), 2, kUpb_ExtMode_NonExtendable, 2, 255, 0,
 };
 
-static const upb_msglayout_field perftools_profiles_Function__fields[5] = {
-  {1, UPB_SIZE(0, 0), 0, 0, 4, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {2, UPB_SIZE(8, 8), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {3, UPB_SIZE(16, 16), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {4, UPB_SIZE(24, 24), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
-  {5, UPB_SIZE(32, 32), 0, 0, 3, _UPB_MODE_SCALAR | (_UPB_REP_8BYTE << _UPB_REP_SHIFT)},
+static const upb_MiniTable_Field perftools_profiles_Function__fields[5] = {
+  {1, UPB_SIZE(0, 0), UPB_SIZE(0, 0), kUpb_NoSub, 4, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {2, UPB_SIZE(8, 8), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {3, UPB_SIZE(16, 16), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {4, UPB_SIZE(24, 24), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
+  {5, UPB_SIZE(32, 32), UPB_SIZE(0, 0), kUpb_NoSub, 3, kUpb_FieldMode_Scalar | (kUpb_FieldRep_8Byte << kUpb_FieldRep_Shift)},
 };
 
-const upb_msglayout perftools_profiles_Function_msginit = {
+const upb_MiniTable perftools_profiles_Function_msginit = {
   NULL,
   &perftools_profiles_Function__fields[0],
-  UPB_SIZE(40, 40), 5, _UPB_MSGEXT_NONE, 5, 255, 0,
+  UPB_SIZE(40, 40), 5, kUpb_ExtMode_NonExtendable, 5, 255, 0,
 };
 
-static const upb_msglayout *messages_layout[8] = {
+static const upb_MiniTable *messages_layout[8] = {
   &perftools_profiles_Profile_msginit,
   &perftools_profiles_ValueType_msginit,
   &perftools_profiles_Sample_msginit,
@@ -156,7 +157,7 @@ static const upb_msglayout *messages_layout[8] = {
   &perftools_profiles_Function_msginit,
 };
 
-const upb_msglayout_file pprof_proto_upb_file_layout = {
+const upb_MiniTable_File pprof_proto_upb_file_layout = {
   messages_layout,
   NULL,
   NULL,

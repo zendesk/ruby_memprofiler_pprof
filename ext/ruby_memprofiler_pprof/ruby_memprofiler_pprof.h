@@ -254,7 +254,7 @@ struct mpp_pprof_serctx {
     // is destroyed, we free the entire arena, so no other (protobuf) memory needs to be individually
     // freed.
     upb_alloc allocator;
-    upb_arena *arena;
+    upb_Arena *arena;
     // Location table used for looking up fucntion & location IDs to strings.
     struct mpp_rb_loctab *loctab;
     // String intern index; recall that holding this object does _not_ require that we have exclusive
