@@ -60,22 +60,24 @@ end
 # So, the safest way to deal with this lack of API compatibility is to just embed it. This part of the
 # script below hacks at the generated makefile that extconf.rb generated, to add targets to build libupb.a
 # (which would _normally_ be built by Bazel, but we don't want to make installers of our gem have that
-# either; hence, these hand-written Makefile rules below)
+# either; hence, these hand-written Makefile rules below). It also builds libutf8range.a, which is a
+# vendored dependency of upb itself.
 #
 # This strategy of simply embedding the upb source is endorsed by the maintainers here:
 # https://github.com/protocolbuffers/upb/pull/480
 File.open('Makefile', 'a') do |f|
   f.puts <<~MAKEFILE
     UPB_OBJS += $(addprefix vendor/upb/upb/,decode.o encode.o msg.o table.o upb.o)
-    UPB_OBJS += vendor/upb/third_party/utf8_range/utf8_range.o
     UPB_HDRS += $(wildcard $(srcdir)/vendor/upb/upb/*.h)
-    UPB_HDRS += $(wildcard $(srcdir)/vendor/upb/third_party/utf8_range/*.h)
     UPB_LIB := vendor/upb/libupb.a
+    UTF8RANGE_OBJS += $(addprefix vendor/upb/third_party/utf8_range/,naive.o range2-neon.o range2-sse.o)
+    UTF8RANGE_HDRS += $(wildcard $(srcdir)vendor/upb/third_party/utf8_range/*.h)
+    UTF8RANGE_LIB := vendor/upb/libutf8range.a
     UPB_CFLAGS += -Wno-shorten-64-to-32 -Wno-sign-compare -Wno-implicit-fallthrough
     UPB_CFLAGS += -Wno-clobbered -Wno-maybe-uninitialized
 
     $(UPB_OBJS): CFLAGS += $(UPB_CFLAGS)
-    $(UPB_OBJS): $(UPB_HDRS)
+    $(UPB_OBJS): $(UPB_HDRS) $(UTF8RANGE_HDRS)
     $(UPB_OBJS): %.o : $(srcdir)/%.c
     \t$(ECHO) compiling $(<)
     \t$(Q) $(MAKEDIRS) $(@D)
@@ -84,8 +86,18 @@ File.open('Makefile', 'a') do |f|
     \t$(ECHO) linking static library $@
     \t$(Q) $(AR) rcs $@ $^
 
-    $(TARGET_SO): $(UPB_LIB)
-    $(TARGET_SO): LOCAL_LIBS += $(UPB_LIB)
+    $(UTF8RANGE_OBJS): CFLAGS += $(UPB_CFLAGS)
+    $(UTF8RANGE_OBJS): $(UTF8RANGE_HDRS)
+    $(UTF8RANGE_OBJS): %.o : $(srcdir)/%.c
+    \t$(ECHO) compiling $(<)
+    \t$(Q) $(MAKEDIRS) $(@D)
+    \t$(Q) $(CC) $(INCFLAGS) $(CPPFLAGS) $(CFLAGS) $(COUTFLAG)$@ -c $(CSRCFLAG)$<
+    $(UTF8RANGE_LIB): $(UTF8RANGE_OBJS)
+    \t$(ECHO) linking static library $@
+    \t$(Q) $(AR) rcs $@ $^
+
+    $(TARGET_SO): $(UPB_LIB) $(UTF8RANGE_LIB)
+    $(TARGET_SO): LOCAL_LIBS += $(UPB_LIB) $(UTF8RANGE_LIB)
     CFLAGS += -I$(srcdir)/vendor/upb
     %.upb.o: CFLAGS += $(UPB_CFLAGS)
   MAKEFILE
