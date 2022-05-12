@@ -33,7 +33,7 @@ append_cflags([
   '-D_GNU_SOURCE', '-std=gnu11', # Use GNU C extensions (e.g. we use this for atomics)
   '-fvisibility=hidden', # Make sure our upb symbols don't clobber any others from other exts
 ])
-append_cflags(['-Wall, -Wextra']) # Enable all the warnings
+append_cflags(['-Wall', '-Wextra']) # Enable all the warnings
 if ENV['WERROR'] == 'true'
   append_cflags(['-Werror']) # Enable werror on CI
 end

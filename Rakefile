@@ -4,6 +4,9 @@ require "rake/testtask"
 require "bump/tasks"
 require "private_gem/tasks"
 
+# Compile verbosely if specified.
+ENV['MAKE'] = "make V=1" if ENV['VERBOSE'] == 'true'
+
 gemspec = Gem::Specification.load("ruby_memprofiler_pprof.gemspec")
 Rake::ExtensionTask.new do |ext|
   ext.name = "ruby_memprofiler_pprof_ext"
