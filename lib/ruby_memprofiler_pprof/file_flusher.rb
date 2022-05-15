@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'fileutils'
+
 module MemprofilerPprof
   class FileFlusher
 
@@ -41,6 +43,9 @@ module MemprofilerPprof
         t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         begin
           profile_data = @collector.flush
+          fname = template_string(@pattern)
+          dirname = File.dirname(fname)
+          FileUtils.mkdir_p dirname
           File.write(template_string(@pattern), profile_data.pprof_data)
         rescue => e
           @logger&.error("FileFlusher: failed to flush profiling data: #{e.inspect}")
