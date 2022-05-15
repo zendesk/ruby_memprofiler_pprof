@@ -1,0 +1,16 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Simply starts the provided program as-is, but sets RUBYLIB so that it will be
+# profiled by ruby_memprofiler_pprof.
+
+require 'shellwords'
+
+base_path = File.expand_path("../lib", __dir__)
+profile_lib = File.join(base_path, 'ruby_memprofiler_pprof', 'profile_app.rb')
+opts = [
+    "-I#{Shellwords.escape base_path}",
+    "-r#{Shellwords.escape profile_lib}"
+]
+ENV['RUBYOPT'] = ENV.fetch('RUBYOPT', '') + opts.join(" ")
+exec *ARGV

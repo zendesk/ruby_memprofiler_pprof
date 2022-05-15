@@ -12,8 +12,10 @@ Gem::Specification.new do |spec|
 
   spec.metadata["allowed_push_host"] = "https://zdrepo.jfrog.io/zdrepo/api/gems/gems-local/"
 
-  spec.files = Dir.glob("{ext,lib}/**/*").reject { |f| %w[.so .bundle].include? File.extname(f) }
+  spec.files = Dir.glob("{ext,lib,libexec}/**/*").reject { |f| %w[.so .bundle].include? File.extname(f) }
   spec.extensions = ["ext/ruby_memprofiler_pprof/extconf.rb"]
+  spec.bindir        = "libexec"
+  spec.executables   = %w[ruby_memprofiler_pprof_profile]
 
   spec.required_ruby_version = ">= 2.6.8"
   spec.add_dependency 'debase-ruby_core_source', '>= 0.10.14'
