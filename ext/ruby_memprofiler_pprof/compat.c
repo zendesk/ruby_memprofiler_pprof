@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <ruby.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdlib.h>
 
 #include "ruby_memprofiler_pprof.h"
@@ -164,4 +165,13 @@ void mpp_assert_fail(
     __attribute__((unused)) size_t r =
         write(STDERR_FILENO, final_msg_buf, final_msg_ix + 1);
     abort();
+}
+
+void mpp_log_debug(const char *pattern, ...) {
+    va_list args;
+    va_start(args, pattern);
+    fprintf(stderr, "ruby_memprofiler_pprof gem: ");
+    vfprintf(stderr, pattern, args);
+    fprintf(stderr, "\n");
+    va_end(args);
 }

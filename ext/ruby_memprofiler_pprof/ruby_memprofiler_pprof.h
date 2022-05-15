@@ -75,6 +75,11 @@ void mpp_assert_fail(const char *msg, const char *assertion, const char *file, c
     } while (0)
 #define MPP_ASSERT_FAIL(expr) MPP_ASSERT_MSG(expr, 0)
 
+// Log a debug message to "somewhere". This could be smarter in future, but for now, this'll do.
+// The implementation here does not depend on holding the GVL.
+// Will automatically add a trailing newline.
+void mpp_log_debug(const char *pattern, ...);
+
 // ======== STRTAB DECLARATIONS ========
 
 #define MPP_STRTAB_USE_STRLEN (-1)
