@@ -8,7 +8,6 @@ require 'securerandom'
 require 'zlib'
 require 'timecop'
 
-# Some dummy functions that call each other
 class DecodedProfileData
   class Sample
     attr_accessor :backtrace, :line_backtrace, :allocations, :allocation_size, :retained_objects, :retained_size
