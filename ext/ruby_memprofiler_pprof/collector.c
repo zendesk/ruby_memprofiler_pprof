@@ -90,6 +90,11 @@ struct collector_cdata {
     size_t rvalue_size;
 };
 
+// We need a global list of all collectors, so that, in our atfork handler, we can correctly lock/unlock
+// all of their mutexes and guarantee correctness across forks.
+static st_table *global_collectors;
+static pthread_mutex_t global_collectors_lock;
+
 static void internal_sample_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
     s->refcount--;
     if (!s->refcount) {
@@ -179,6 +184,12 @@ static void collector_cdata_gc_free(void *ptr) {
     collector_cdata_gc_free_allocation_samples(cd);
     collector_cdata_gc_free_loctab(cd);
     collector_cdata_gc_free_strtab(cd);
+
+    // Remove from global collectors list.
+    mpp_pthread_mutex_lock(&global_collectors_lock);
+    st_data_t cd_key = (st_data_t)cd;
+    st_delete(global_collectors, &cd_key, NULL);
+    mpp_pthread_mutex_unlock(&global_collectors_lock);
 
     mpp_pthread_mutex_unlock(&cd->lock);
     mpp_pthread_mutex_destroy(&cd->lock);
@@ -292,6 +303,10 @@ static VALUE collector_alloc(VALUE klass) {
     mpp_pthread_mutex_init(&cd->lock, &mutex_attr);
     mpp_pthread_mutexattr_destroy(&mutex_attr);
 
+    // Add us to the global list of collectors, to handle pthread_atfork.
+    mpp_pthread_mutex_lock(&global_collectors_lock);
+    st_insert(global_collectors, (st_data_t)cd, (st_data_t)cd);
+    mpp_pthread_mutex_unlock(&global_collectors_lock);
     return v;
 }
 
@@ -924,6 +939,53 @@ static VALUE collector_bt_method_set(VALUE self, VALUE newval) {
     return newval;
 }
 
+static int mpp_collector_atfork_lock_el(st_data_t key, st_data_t value, st_data_t arg) {
+    struct collector_cdata *cd = (struct collector_cdata *)key;
+    mpp_pthread_mutex_lock(&cd->lock);
+    return ST_CONTINUE;
+}
+
+static int mpp_collector_atfork_unlock_el(st_data_t key, st_data_t value, st_data_t arg) {
+    struct collector_cdata *cd = (struct collector_cdata *)key;
+    mpp_pthread_mutex_unlock(&cd->lock);
+    return ST_CONTINUE;
+}
+
+static int mpp_collector_atfork_replace_el(st_data_t key, st_data_t value, st_data_t arg) {
+    struct collector_cdata *cd = (struct collector_cdata *)key;
+
+    // In the parent process, we simply release the mutexes, but in the child process, we have
+    // to _RECREATE_ them. This is because they're recursive mutexes, and must hold some kind of
+    // thread ID in them somehow; unlocking them post-fork simply doesn't work it seems.
+    // It's safe to re-create the mutex at this point, because no other thread can possibly be
+    // holding it since we took it pre-fork
+    mpp_pthread_mutex_destroy(&cd->lock);
+    pthread_mutexattr_t mutex_attr;
+    mpp_pthread_mutexattr_init(&mutex_attr);
+    mpp_pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    memset(&cd->lock, 0, sizeof(cd->lock));
+    mpp_pthread_mutex_init(&cd->lock, &mutex_attr);
+    mpp_pthread_mutexattr_destroy(&mutex_attr);
+
+    return ST_CONTINUE;
+}
+
+static void mpp_collector_atfork_prepare() {
+    mpp_pthread_mutex_lock(&global_collectors_lock);
+    st_foreach(global_collectors, mpp_collector_atfork_lock_el, 0);
+}
+
+static void mpp_collector_atfork_release_parent() {
+    st_foreach(global_collectors, mpp_collector_atfork_unlock_el, 0);
+    mpp_pthread_mutex_unlock(&global_collectors_lock);
+}
+
+static void mpp_collector_atfork_release_child() {
+    st_foreach(global_collectors, mpp_collector_atfork_replace_el, 0);
+    mpp_pthread_mutex_unlock(&global_collectors_lock);
+}
+
+
 void mpp_setup_collector_class() {
     VALUE mMemprofilerPprof = rb_const_get(rb_cObject, rb_intern("MemprofilerPprof"));
     VALUE cCollector = rb_define_class_under(mMemprofilerPprof, "Collector", rb_cObject);
@@ -945,4 +1007,8 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "flush", collector_flush, 0);
     rb_define_method(cCollector, "profile", collector_profile, 0);
     rb_define_method(cCollector, "live_heap_samples_count", collector_live_heap_samples_count, 0);
+
+    global_collectors = st_init_numtable();
+    mpp_pthread_mutex_init(&global_collectors_lock, NULL);
+    mpp_pthread_atfork(mpp_collector_atfork_prepare, mpp_collector_atfork_release_parent, mpp_collector_atfork_release_child);
 }

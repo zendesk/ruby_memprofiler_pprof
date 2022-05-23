@@ -127,6 +127,11 @@ void mpp_pthread_mutexattr_settype(pthread_mutexattr_t *a, int type) {
     }
 }
 
+void mpp_pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void)) {
+    if (pthread_atfork(prepare, parent, child) != 0) {
+        MPP_ASSERT_FAIL("pthread_atfork failed in ruby_memprofiler_pprof gem");
+    }
+}
 
 __attribute__ ((noreturn))
 void mpp_assert_fail(

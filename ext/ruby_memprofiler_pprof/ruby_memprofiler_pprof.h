@@ -56,6 +56,7 @@ void mpp_pthread_mutex_destroy(pthread_mutex_t *m);
 void mpp_pthread_mutexattr_init(pthread_mutexattr_t *a);
 void mpp_pthread_mutexattr_destroy(pthread_mutexattr_t *a);
 void mpp_pthread_mutexattr_settype(pthread_mutexattr_t *a, int type);
+void mpp_pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void));
 
 // Need a handy assertion macro. It would be nice to re-use rb_bug for some of this, but that actually
 // requires the GVL (it walks the Ruby stack frames, for one) and we (want to) run some code outside

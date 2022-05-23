@@ -11,7 +11,7 @@ require 'ruby_memprofiler_pprof'
 # TODO - handle some kind of atfork stuff.
 
 collector = MemprofilerPprof::Collector.new
-collector.sample_rate = 0.5
+collector.sample_rate = ENV.fetch('RUBY_MEMPROFILER_PPROF_SAMPLE_RATE', '1').to_f
 flusher = MemprofilerPprof::FileFlusher.new(collector, logger: Logger.new(STDERR))
 collector.start!
 flusher.start!

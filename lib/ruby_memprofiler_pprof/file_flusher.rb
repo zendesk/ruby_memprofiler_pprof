@@ -1,60 +1,31 @@
 # frozen_string_literal: true
 
 require 'fileutils'
+require 'forwardable'
 
 module MemprofilerPprof
   class FileFlusher
-
-    attr_reader :collector
+    extend Forwardable
 
     def initialize(collector, pattern: 'tmp/profiles/mem-%{pid}-%{isotime}.pprof', interval: 30, logger: nil)
-      @collector = collector
-      @pattern = pattern
-      @interval = interval
       @logger = logger
-      @thread = nil
+      @pattern = pattern
       @profile_counter = 0
+      @block_flusher = BlockFlusher.new(collector, interval: interval, logger: logger, on_flush: method(:on_flush))
     end
 
-    def start!
-      @thread = Thread.new { flusher_thread }
-    end
-
-    def stop!
-      @thread.kill
-      @thread.join
-    end
-
-    def run
-      start!
-      begin
-        yield
-      ensure
-        stop!
-      end
-    end
+    def_delegators :@block_flusher, :start!, :stop!, :run
 
     private
 
-    def flusher_thread
-      prev_flush_duration = 0
-      loop do
-        sleep([0, @interval - prev_flush_duration].max)
-        t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        begin
-          profile_data = @collector.flush
-          fname = template_string(@pattern)
-          dirname = File.dirname(fname)
-          FileUtils.mkdir_p dirname
-          File.write(template_string(@pattern), profile_data.pprof_data)
-        rescue => e
-          @logger&.error("FileFlusher: failed to flush profiling data: #{e.inspect}")
-        ensure
-          t2 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          prev_flush_duration = (t2 - t1)
-          @profile_counter += 1
-        end
-      end
+    def on_flush(profile_data)
+      fname = template_string(@pattern)
+      dirname = File.dirname(fname)
+      FileUtils.mkdir_p dirname
+      File.write(template_string(@pattern), profile_data.pprof_data)
+      @profile_counter += 1
+    rescue => e
+      @logger&.error("FileFlusher: failed to flush profiling data: #{e.inspect}")
     end
 
     def template_string(tmpl)

@@ -4,54 +4,51 @@ require_relative 'test_helper'
 require 'fileutils'
 require 'tmpdir'
 
+class FakeSleepExtension
+
+end
+
 describe MemprofilerPprof::FileFlusher do
   before do
     @dir = Dir.mktmpdir
     Timecop.freeze(Time.now)
+    setup_fake_sleep(MemprofilerPprof::BlockFlusher)
   end
 
   after do
+    MemprofilerPprof::BlockFlusher.unstub_sleep
     Timecop.return
     FileUtils.remove_entry @dir
   end
 
+  def alloc_method_1
+    SecureRandom.hex(10)
+  end
+  def alloc_method_2
+    SecureRandom.hex(10)
+  end
+  def alloc_method_3
+    SecureRandom.hex(10)
+  end
+
+  def wait_for_file_exist(file)
+    50.times do
+      return if File.exist?(file)
+      sleep 0.1
+      MemprofilerPprof::BlockFlusher.advance_sleep 10
+    end
+    raise "File #{file} did not get created"
+  end
+
   it 'writes profiles to the directory' do
-    def alloc_method_1
-      SecureRandom.hex(10)
-    end
-    def alloc_method_2
-      SecureRandom.hex(10)
-    end
-
-
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
     flusher = MemprofilerPprof::FileFlusher.new(c, pattern: "#{@dir}/%{index}.pprof", interval: 15)
-
-    # Stub Kernel#sleep within the Flusher to flush on our command.
-    flusher_waker = Queue.new
-    flusher.instance_variable_set(:@__flusher_waker, flusher_waker)
-    flusher.singleton_class.prepend(Module.new do
-      def sleep(*)
-        @__flusher_waker.pop
-        nil
-      end
-    end)
-
-    def wait_for_file_exist(file)
-      50.times do
-        return if File.exist?(file)
-        sleep 0.1
-      end
-      raise "File #{file} did not get created"
-    end
 
     flusher.run do
       c.profile do
         alloc_method_1
-        flusher_waker << :wake
         wait_for_file_exist "#{@dir}/0.pprof"
         alloc_method_2
-        flusher_waker << :wake
         wait_for_file_exist "#{@dir}/1.pprof"
       end
     end
@@ -66,5 +63,39 @@ describe MemprofilerPprof::FileFlusher do
     assert profile_1.allocation_samples_including_stack(['alloc_method_2']).empty?
     assert profile_2.allocation_samples_including_stack(['alloc_method_2']).size > 0
     assert profile_2.allocation_samples_including_stack(['alloc_method_1']).empty?
+  end
+
+  it 'writes for both parent and child on fork' do
+    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
+    flusher = MemprofilerPprof::FileFlusher.new(c, pattern: "#{@dir}/%{pid}-%{index}.pprof", interval: 15)
+
+    flusher.start!
+    c.start!
+
+    alloc_method_1
+    parent_pid = Process.pid
+    child_pid = fork do
+      # Child process
+      alloc_method_2
+      wait_for_file_exist "#{@dir}/#{Process.pid}-0.pprof"
+      exit! 0
+    end
+    alloc_method_3
+    wait_for_file_exist "#{@dir}/#{Process.pid}-0.pprof"
+
+    c.stop!
+    flusher.stop!
+
+    Process.waitpid child_pid
+    profile_parent = DecodedProfileData.new(File.read("#{@dir}/#{parent_pid}-0.pprof"))
+    profile_child = DecodedProfileData.new(File.read("#{@dir}/#{child_pid}-0.pprof"))
+
+    assert profile_parent.allocation_samples_including_stack(['alloc_method_1']).size > 0
+    assert profile_parent.allocation_samples_including_stack(['alloc_method_2']).empty?
+    assert profile_parent.allocation_samples_including_stack(['alloc_method_3']).size > 0
+
+    assert profile_child.allocation_samples_including_stack(['alloc_method_1']).size > 0
+    assert profile_child.allocation_samples_including_stack(['alloc_method_2']).size > 0
+    assert profile_child.allocation_samples_including_stack(['alloc_method_3']).empty?
   end
 end
