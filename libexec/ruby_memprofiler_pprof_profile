@@ -12,5 +12,5 @@ opts = [
     "-I#{Shellwords.escape base_path}",
     "-r#{Shellwords.escape profile_lib}"
 ]
-ENV['RUBYOPT'] = ENV.fetch('RUBYOPT', '') + opts.join(" ")
+ENV['RUBYOPT'] = ([ENV.fetch('RUBYOPT', nil)] + opts).compact.join(" ")
 exec *ARGV
