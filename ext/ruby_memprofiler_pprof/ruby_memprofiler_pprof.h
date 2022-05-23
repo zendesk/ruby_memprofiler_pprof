@@ -295,8 +295,6 @@ int mpp_pprof_serctx_serialize(
 );
 
 // ======== COLLECTOR RUBY CLASS ========
-extern VALUE mMemprofilerPprof;
-extern VALUE cCollector;
 void mpp_setup_collector_class();
 
 #endif

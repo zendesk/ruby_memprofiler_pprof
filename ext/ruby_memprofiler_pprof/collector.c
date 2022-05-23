@@ -11,12 +11,14 @@
 
 #include "ruby_memprofiler_pprof.h"
 
-VALUE cCollector;
-VALUE cProfileData;
-
 struct collector_cdata {
     // Internal, cross-ractor lock for this data
     pthread_mutex_t lock;
+
+    // Global variables we need to keep a hold of
+    VALUE cCollector;
+    VALUE cProfileData;
+    VALUE mMemprofilerPprof;
 
     // Ruby Tracepoint objects for our hooks
     VALUE newobj_trace;
@@ -147,6 +149,9 @@ static void collector_cdata_gc_mark(void *ptr) {
     rb_gc_mark_movable(cd->newobj_trace);
     rb_gc_mark_movable(cd->freeobj_trace);
     rb_gc_mark_movable(cd->creturn_trace);
+    rb_gc_mark_movable(cd->mMemprofilerPprof);
+    rb_gc_mark_movable(cd->cCollector);
+    rb_gc_mark_movable(cd->cProfileData);
 }
 
 static void collector_cdata_gc_free(void *ptr) {
@@ -217,6 +222,9 @@ static void collector_cdata_gc_compact(void *ptr) {
     cd->newobj_trace = rb_gc_location(cd->newobj_trace);
     cd->freeobj_trace = rb_gc_location(cd->freeobj_trace);
     cd->creturn_trace = rb_gc_location(cd->creturn_trace);
+    cd->mMemprofilerPprof = rb_gc_location(cd->mMemprofilerPprof);
+    cd->cCollector = rb_gc_location(cd->cCollector);
+    cd->cProfileData = rb_gc_location(cd->cProfileData);
     st_foreach(cd->heap_samples, collector_move_each_live_object, (st_data_t)cd);
 }
 #endif
@@ -290,6 +298,11 @@ struct initialize_protected_args {
 static VALUE collector_initialize_protected(VALUE vargs) {
     struct initialize_protected_args *args = (struct initialize_protected_args *)vargs;
     struct collector_cdata *cd = args->cd;
+
+    // Save constants
+    cd->mMemprofilerPprof = rb_const_get(rb_cObject, rb_intern("MemprofilerPprof"));
+    cd->cCollector = rb_const_get(cd->mMemprofilerPprof, rb_intern("Collector"));
+    cd->cProfileData = rb_const_get(cd->mMemprofilerPprof, rb_intern("ProfileData"));
 
     // Argument parsing
     VALUE kwargs_hash = Qnil;
@@ -711,6 +724,7 @@ static int collector_heap_samples_each_add(st_data_t key, st_data_t val, st_data
 struct collector_flush_prepresult_args {
     const char *pprofbuf;
     size_t pprofbuf_len;
+    VALUE cProfileData;
 
     // Extra struff that needs to go onto the struct.
     int64_t allocation_samples_count;
@@ -731,7 +745,7 @@ static VALUE collector_flush_prepresult(VALUE vargs) {
         (struct collector_flush_prepresult_args *)vargs;
 
     VALUE pprof_data = rb_str_new(args->pprofbuf, args->pprofbuf_len);
-    VALUE profile_data = rb_class_new_instance(0, NULL, cProfileData);
+    VALUE profile_data = rb_class_new_instance(0, NULL, args->cProfileData);
     rb_funcall(profile_data, rb_intern("pprof_data="), 1, pprof_data);
     rb_funcall(profile_data, rb_intern("allocation_samples_count="), 1, LONG2NUM(args->allocation_samples_count));
     rb_funcall(profile_data, rb_intern("heap_samples_count="), 1, LONG2NUM(args->heap_samples_count));
@@ -821,6 +835,7 @@ static VALUE collector_flush(VALUE self) {
     // of our return value to ensure we don't leak serctx.
     prepresult_args.pprofbuf = buf_out;
     prepresult_args.pprofbuf_len = buflen_out;
+    prepresult_args.cProfileData = cd->cProfileData;
     retval = rb_protect(collector_flush_prepresult, (VALUE)&prepresult_args, &jump_tag);
 
     // Do cleanup here now.
@@ -900,9 +915,10 @@ static VALUE collector_bt_method_set(VALUE self, VALUE newval) {
 }
 
 void mpp_setup_collector_class() {
-    cProfileData = rb_const_get(mMemprofilerPprof, rb_intern("ProfileData"));
-    cCollector = rb_define_class_under(mMemprofilerPprof, "Collector", rb_cObject);
+    VALUE mMemprofilerPprof = rb_const_get(rb_cObject, rb_intern("MemprofilerPprof"));
+    VALUE cCollector = rb_define_class_under(mMemprofilerPprof, "Collector", rb_cObject);
     rb_define_alloc_func(cCollector, collector_alloc);
+
 
     rb_define_method(cCollector, "initialize", collector_initialize, -1);
     rb_define_method(cCollector, "sample_rate", collector_get_sample_rate, 0);
