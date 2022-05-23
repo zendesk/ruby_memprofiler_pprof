@@ -26,6 +26,9 @@ internal_headers = proc {
     have_header("version.h")
 }
 
+# Need to actually link pthreads properly
+have_library("pthread") or raise "missing pthread library"
+
 # Set our cflags up _only after_ we have run all the existence checks above; otherwise
 # stuff like -Werror can break the test programs.
 append_cflags([
