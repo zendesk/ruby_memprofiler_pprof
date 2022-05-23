@@ -39,10 +39,14 @@ struct collector_cdata {
     int64_t allocation_samples_count;
     // How big the linked list can grow
     int64_t max_allocation_samples;
-    // When objects are first allocated, we often won't actually know their _real_ size; calling
-    // rb_obj_memsize_of() on them will return sizeof(RVALUE). If e.g. a T_STRING is being allocated,
-    // the heap memory for that is actually only allocated _after_ the newobj tracepoint fires. To
-    // make sure we can see the "real" size of these, we add a tracepoint on CRETURN. When that hook
+    // When objects are first allocated, we won't actually know their _real_ size; the object is not
+    // in a state where calling rb_obj_memsize_of() on it is well-defined. Among other things, if the
+    // object is T_CLASS, the ivar table won't be initialized yet, and trying to get its size will crash.
+    // Even if it _did_ work (which it did, in versions of Ruby before variable-sized RValues), calling
+    // rb_obj_memsize_of() will return sizeof(RVALUE). If e.g. a T_STRING is being allocated,
+    // the heap memory for that is actually only allocated _after_ the newobj tracepoint fires.
+    //
+    // To make sure we can see the "real" size of these, we add a tracepoint on CRETURN. When that hook
     // fires, we check the size of all (still-live) objects recently allocated, and store _that_ as
     // the allocation size. This works well for T_STRING, T_DATA, T_STRUCT's etc that are allocated
     // inside C and then immediately filled; the correct memsize will be recorded on them before the
@@ -81,6 +85,9 @@ struct collector_cdata {
 
     // Which method to use for getting backtraces
     int bt_method;
+
+    // This we need to know so we can at least give a non-zero size for new objects.
+    size_t rvalue_size;
 };
 
 static void internal_sample_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
@@ -334,6 +341,9 @@ static VALUE collector_initialize_protected(VALUE vargs) {
     cd->heap_samples = st_init_numtable();
     cd->heap_samples_count = 0;
 
+    VALUE internal_constants = rb_const_get(rb_mGC, rb_intern("INTERNAL_CONSTANTS"));
+    cd->rvalue_size = NUM2LONG(rb_hash_aref(internal_constants, rb_id2sym(rb_intern("RVALUE_SIZE"))));
+
     return Qnil;
 }
 
@@ -433,7 +443,7 @@ static VALUE collector_tphook_newobj_protected(VALUE args_as_uintptr) {
     } else {
         MPP_ASSERT_FAIL("unknown bt_method");
     }
-    args->allocation_size = rb_obj_memsize_of(args->newobj);
+    args->allocation_size = cd->rvalue_size;
     return Qnil;
 }
 
