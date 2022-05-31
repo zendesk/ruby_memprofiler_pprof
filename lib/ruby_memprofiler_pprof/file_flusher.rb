@@ -22,7 +22,10 @@ module MemprofilerPprof
       fname = template_string(@pattern)
       dirname = File.dirname(fname)
       FileUtils.mkdir_p dirname
-      File.write(template_string(@pattern), profile_data.pprof_data)
+      # Need to explicitly specify the encoding, because some applications might do exotic
+      # things to File#default_external/#default_internal that would attempt to convert
+      # our protobuf to UTF-8.
+      File.write(template_string(@pattern), profile_data.pprof_data, encoding: 'ASCII-8BIT')
       @profile_counter += 1
     rescue => e
       @logger&.error("FileFlusher: failed to flush profiling data: #{e.inspect}")
