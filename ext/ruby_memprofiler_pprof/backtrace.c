@@ -261,6 +261,9 @@ void mpp_rb_backtrace_capture(struct mpp_rb_loctab *loctab, struct mpp_rb_backtr
         if (cfp->iseq && cfp->pc) {
             // I believe means this backtrace frame is ruby code
             size_t iseq_pos = (size_t)(cfp->pc - cfp->iseq->body->iseq_encoded);
+            // To quote Ruby:
+            // "use pos-1 because PC points next instruction at the beginning of instruction"
+            if (iseq_pos) iseq_pos--;
             frame_args.location_line_number = rb_iseq_line_no(cfp->iseq, iseq_pos);
             frame_args.fn_name_value = rb_iseq_method_name(cfp->iseq);
             frame_args.file_name_value = rb_iseq_path(cfp->iseq);
