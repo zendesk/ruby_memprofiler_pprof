@@ -639,9 +639,8 @@ static void collector_tphook_creturn(VALUE tpval, void *data) {
 
     original_errinfo = rb_errinfo();
     rb_protect(collector_tphook_creturn_protected, (VALUE)cd, &jump_tag);
-    if (!jump_tag) {
-        cd->pending_size_count = 0;
-    } else {
+    cd->pending_size_count = 0;
+    if (jump_tag) {
         rb_set_errinfo(original_errinfo);
     }
 
