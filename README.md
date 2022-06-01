@@ -1,5 +1,7 @@
 # ruby_memprofiler_pprof: A heap profiler for Ruby applications.
 
+**⚠️⚠️🚧🚧 WARNING: THIS IS PRE-ALPHA SOFTWARE. IF YOU USE THIS IN PRODUCTION, YOU WILL BE THE FIRST ONE. ⚠️⚠️🚧🚧**
+
 Ruby_memprofiler_pprof (RMP for short, in this README!) is a tool designed to help understand memory usage in large Ruby applications. It's intended to help answer questions like "why is my app's memory usage so high?", or "why is my app leaking memory?"; it's also designed to be usable in production environments, to help solve the dreaded "...but only in production??" part of those questions too.
 
 RMP is a gem that's intended to run continuously inside a running Ruby app from the very beginning. It periodically produces profile data in the [pprof](https://github.com/google/pprof/blob/master/doc/README.md) format. It's capable of gathering a few different kinds of information, but at its heart the profiles RMP produces contain two key pieces of information:
