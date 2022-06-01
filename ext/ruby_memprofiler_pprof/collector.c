@@ -619,6 +619,8 @@ static VALUE collector_tphook_creturn_protected(VALUE cdataptr) {
             struct mpp_sample *next_s = s->next_alloc;
             internal_sample_decrement_refcount(cd, s);
             s = next_s;
+
+            cd->allocation_samples_count--;
         } else {
             prev_slot = &s->next_alloc;
             s = s->next_alloc;
