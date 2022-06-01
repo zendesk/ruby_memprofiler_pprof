@@ -529,7 +529,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 
     // This looks super redundant, _BUT_ there is a narrow possibility that some of the code we invoke
     // inside the rb_protect actually does RVALUE allocations itself, and so recursively runs this hook
-    // (which wokk work, because the &cd->lock mutex is recursive). So, we need to actually check
+    // (which will work, because the &cd->lock mutex is recursive). So, we need to actually check
     // our buffer sizes _again_.
     if (cd->allocation_samples_count >= cd->max_allocation_samples) {
         __atomic_add_fetch(&cd->dropped_samples_allocation_bufsize, 1, __ATOMIC_SEQ_CST);
