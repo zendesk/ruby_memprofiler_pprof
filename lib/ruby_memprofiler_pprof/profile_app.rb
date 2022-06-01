@@ -17,6 +17,14 @@ end
 if ENV.key?('RUBY_MEMPROFILER_PPROF_MAX_HEAP_SAMPLES')
   collector.max_heap_samples = ENV['RUBY_MEMPROFILER_PPROF_MAX_HEAP_SAMPLES'].to_i
 end
-flusher = MemprofilerPprof::FileFlusher.new(collector, logger: Logger.new(STDERR))
+
+kwargs = {
+  logger: Logger.new(STDERR)
+}
+if ENV.key?('RUBY_MEMPROFILER_PPROF_FILE_PATTERN')
+  kwargs[:pattern] = ENV['RUBY_MEMPROFILER_PPROF_FILE_PATTERN']
+end
+
+flusher = MemprofilerPprof::FileFlusher.new(collector, **kwargs)
 collector.start!
 flusher.start!

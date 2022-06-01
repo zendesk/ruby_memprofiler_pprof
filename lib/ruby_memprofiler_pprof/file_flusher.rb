@@ -15,6 +15,7 @@ module MemprofilerPprof
     end
 
     def_delegators :@block_flusher, :start!, :stop!, :run
+    attr_accessor :pattern
 
     private
 
