@@ -28,6 +28,10 @@ struct collector_cdata {
     // How often (as a fraction of UINT32_MAX) we should sample allocations;
     // Must be accessed through atomics
     uint32_t u32_sample_rate;
+    // How often (as a fraction of UINT32_MAX) we should retain allocations, to profile allocations
+    // as well as just heap usage.
+    // Does _NOT_ need to be accessed through atomics.
+    uint32_t u32_allocation_retain_rate;
     // This flag is used to make sure we detach our tracepoints as we're getting GC'd.
     bool is_tracing;
 
@@ -329,24 +333,27 @@ static VALUE collector_initialize_protected(VALUE vargs) {
     // Argument parsing
     VALUE kwargs_hash = Qnil;
     rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, args->argc, args->argv, "00:", &kwargs_hash);
-    VALUE kwarg_values[4];
-    ID kwarg_ids[4];
+    VALUE kwarg_values[5];
+    ID kwarg_ids[5];
     kwarg_ids[0] = rb_intern("sample_rate");
     kwarg_ids[1] = rb_intern("max_allocation_samples");
     kwarg_ids[2] = rb_intern("max_heap_samples");
     kwarg_ids[3] = rb_intern("bt_method");
-    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 4, kwarg_values);
+    kwarg_ids[4] = rb_intern("allocation_retain_rate");
+    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 5, kwarg_values);
 
     // Default values...
     if (kwarg_values[0] == Qundef) kwarg_values[0] = DBL2NUM(0.01);
     if (kwarg_values[1] == Qundef) kwarg_values[1] = LONG2NUM(10000);
     if (kwarg_values[2] == Qundef) kwarg_values[2] = LONG2NUM(50000);
     if (kwarg_values[3] == Qundef) kwarg_values[3] = rb_id2sym(rb_intern("cfp"));
+    if (kwarg_values[4] == Qundef) kwarg_values[4] = DBL2NUM(1);
 
     rb_funcall(args->self, rb_intern("sample_rate="), 1, kwarg_values[0]);
     rb_funcall(args->self, rb_intern("max_allocation_samples="), 1, kwarg_values[1]);
     rb_funcall(args->self, rb_intern("max_heap_samples="), 1, kwarg_values[2]);
     rb_funcall(args->self, rb_intern("bt_method="), 1, kwarg_values[3]);
+    rb_funcall(args->self, rb_intern("allocation_retain_rate="), 1, kwarg_values[4]);
 
     cd->string_tab = mpp_strtab_new();
     cd->loctab = mpp_rb_loctab_new(cd->string_tab);
@@ -390,6 +397,23 @@ static VALUE collector_set_sample_rate(VALUE self, VALUE newval) {
     // Convert the double sample rate (between 0 and 1) to a value between 0 and UINT32_MAX
     uint32_t new_sample_rate_uint = UINT32_MAX * dbl_sample_rate;
     __atomic_store_n(&cd->u32_sample_rate, new_sample_rate_uint, __ATOMIC_SEQ_CST);
+    return newval;
+}
+
+static VALUE collector_get_allocation_retain_rate(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    mpp_pthread_mutex_lock(&cd->lock);
+    uint32_t retain_rate_u32 = cd->u32_allocation_retain_rate;
+    mpp_pthread_mutex_unlock(&cd->lock);
+    return DBL2NUM(((double)retain_rate_u32)/UINT32_MAX);
+}
+
+static VALUE collector_set_allocation_retain_rate(VALUE self, VALUE newval) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    uint32_t retain_rate_u32 = UINT32_MAX * NUM2DBL(newval);
+    mpp_pthread_mutex_lock(&cd->lock);
+    cd->u32_allocation_retain_rate = retain_rate_u32;
+    mpp_pthread_mutex_unlock(&cd->lock);
     return newval;
 }
 
@@ -568,6 +592,7 @@ static VALUE collector_tphook_creturn_protected(VALUE cdataptr) {
     struct collector_cdata *cd = (struct collector_cdata *)cdataptr;
 
     struct mpp_sample *s = cd->allocation_samples;
+    struct mpp_sample **prev_slot = &cd->allocation_samples;
     for (int64_t i = 0; i < cd->pending_size_count; i++) {
         MPP_ASSERT_MSG(s, "More pending size samples than samples in linked list??");
         // Ruby apparently has the right to free stuff that's used internally (like T_IMEMOs)
@@ -584,7 +609,20 @@ static VALUE collector_tphook_creturn_protected(VALUE cdataptr) {
             s->allocation_size = rb_obj_memsize_of(s->allocated_value_weak);
             s->current_size = s->allocation_size;
         }
-        s = s->next_alloc;
+
+        if (mpp_rand() > cd->u32_allocation_retain_rate) {
+            // Drop this sample out of the allocation sample list. We've been asked to drop a certain
+            // percentage of things out of this list, so we don't OOM with piles of short-lived objects.
+            *prev_slot = s->next_alloc;
+
+            // Annoying little dance here so we don't read s->next_alloc after freeing s.
+            struct mpp_sample *next_s = s->next_alloc;
+            internal_sample_decrement_refcount(cd, s);
+            s = next_s;
+        } else {
+            prev_slot = &s->next_alloc;
+            s = s->next_alloc;
+        }
     }
     return Qnil;
 }
@@ -1001,6 +1039,8 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "max_heap_samples=", collector_set_max_heap_samples, 1);
     rb_define_method(cCollector, "bt_method", collector_bt_method_get, 0);
     rb_define_method(cCollector, "bt_method=", collector_bt_method_set, 1);
+    rb_define_method(cCollector, "allocation_retain_rate", collector_get_allocation_retain_rate, 0);
+    rb_define_method(cCollector, "allocation_retain_rate=", collector_set_allocation_retain_rate, 1);
     rb_define_method(cCollector, "running?", collector_is_running, 0);
     rb_define_method(cCollector, "start!", collector_start, 0);
     rb_define_method(cCollector, "stop!", collector_stop, 0);

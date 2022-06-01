@@ -10,6 +10,13 @@ require 'ruby_memprofiler_pprof'
 
 collector = MemprofilerPprof::Collector.new
 collector.sample_rate = ENV.fetch('RUBY_MEMPROFILER_PPROF_SAMPLE_RATE', '1').to_f
+collector.allocation_retain_rate = ENV.fetch('RUBY_MEMPROFILER_PPROF_ALLOC_RETAIN_RATE', '1').to_f
+if ENV.key?('RUBY_MEMPROFILER_PPROF_MAX_ALLOC_SAMPLES')
+  collector.max_allocation_samples = ENV['RUBY_MEMPROFILER_PPROF_MAX_ALLOC_SAMPLES'].to_i
+end
+if ENV.key?('RUBY_MEMPROFILER_PPROF_MAX_HEAP_SAMPLES')
+  collector.max_heap_samples = ENV['RUBY_MEMPROFILER_PPROF_MAX_HEAP_SAMPLES'].to_i
+end
 flusher = MemprofilerPprof::FileFlusher.new(collector, logger: Logger.new(STDERR))
 collector.start!
 flusher.start!
