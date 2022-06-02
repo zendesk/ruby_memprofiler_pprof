@@ -2,7 +2,6 @@ require "bundler/gem_tasks"
 require "rake/extensiontask"
 require "rake/testtask"
 require "bump/tasks"
-require "private_gem/tasks"
 
 # Compile verbosely if specified.
 ENV['MAKE'] = "make V=1" if ENV['VERBOSE'] == 'true'
