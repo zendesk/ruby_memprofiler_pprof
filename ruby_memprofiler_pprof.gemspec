@@ -10,8 +10,6 @@ Gem::Specification.new do |spec|
   spec.homepage = "https://github.com/zendesk/ruby_memprofiler_pprof"
   spec.license = "Copyright Zendesk. All Rights Reserved"
 
-  spec.metadata["allowed_push_host"] = "https://zdrepo.jfrog.io/zdrepo/api/gems/gems-local/"
-
   spec.files = Dir.glob("{ext,lib,libexec}/**/*").reject { |f| %w[.so .bundle].include? File.extname(f) }
   spec.extensions = ["ext/ruby_memprofiler_pprof/extconf.rb"]
   spec.bindir        = "libexec"
