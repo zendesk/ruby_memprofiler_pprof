@@ -6,7 +6,7 @@ require 'benchmark'
 require 'securerandom'
 require 'objspace'
 require 'pp'
-Bundler.require
+require 'ruby_memprofiler_pprof'
 
 NUM_DISTINCT_CLASSES = 10000
 NUM_DISTINCT_METHODS = 20000
@@ -77,18 +77,18 @@ def benchmark_machine(sc, leak_pit)
 end
 
 
-Benchmark.bm(20) do |b|
+Benchmark.bm(50) do |b|
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
-  b.report("default1") do
+  b.report("no profiling (1)") do
     benchmark_machine(sc, leak_pit)
   end
 
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
-  b.report("default2") do
+  b.report("no profiling (2)") do
     benchmark_machine(sc, leak_pit)
   end
 
@@ -98,7 +98,7 @@ Benchmark.bm(20) do |b|
   $collector = MemprofilerPprof::Collector.new
   $collector.sample_rate = 0.1
   $collector.bt_method = :cfp
-  b.report("with_profiling") do
+  b.report("with profiling (10%, CFP walking)") do
     $collector.start!
 
     benchmark_machine(sc, leak_pit)
@@ -109,7 +109,7 @@ Benchmark.bm(20) do |b|
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
-  b.report("with_report") do
+  b.report("with reporting (10%, CFP walking)") do
     $collector.start!
 
     benchmark_machine(sc, leak_pit)
@@ -125,7 +125,7 @@ Benchmark.bm(20) do |b|
   $collector = MemprofilerPprof::Collector.new
   $collector.sample_rate = 0.1
   $collector.bt_method = :slowrb
-  b.report("with_slowrb_backtrace") do
+  b.report("with profiling (10%, Thread#backtrace_location)") do
     $collector.start!
 
     benchmark_machine(sc, leak_pit)
