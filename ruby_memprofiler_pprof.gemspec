@@ -8,7 +8,7 @@ Gem::Specification.new do |spec|
   spec.summary = "Ruby pprof memproy profiler"
   spec.description = "Generates pprof profiles of ruby memory usage"
   spec.homepage = "https://github.com/zendesk/ruby_memprofiler_pprof"
-  spec.license = "Copyright Zendesk. All Rights Reserved"
+  spec.license = "MIT"
 
   spec.files = Dir.glob("{ext,lib,libexec}/**/*").reject { |f| %w[.so .bundle].include? File.extname(f) }
   spec.extensions = ["ext/ruby_memprofiler_pprof/extconf.rb"]
