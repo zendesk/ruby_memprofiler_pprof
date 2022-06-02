@@ -1,3 +1,4 @@
 *.so
 *.bundle
 tmp/
+*.gem

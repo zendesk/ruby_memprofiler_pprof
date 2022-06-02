@@ -13,10 +13,10 @@ Because RMP is designed for production use, it also supports setting a sample ra
 
 ## Quick start
 
-Add the `ruby_memprofiler_pprof` gem to your Gemfile (n.b. - the gem is not yet published to Rubygems)
+Add the `ruby_memprofiler_pprof` gem to your Gemfile. Note that the gem is pre-alpha and has no stable interface yet, so you should pin to the exact version you want.
 
 ```ruby
-gem 'ruby_memprofiler_pprof', git: 'https://github.com/zendesk/ruby_memprofiler_pprof.git'
+gem 'ruby_memprofiler_pprof', '=0.0.1'
 ```
 
 You can profile an application with `ruby_memprofiler_pprof` in two ways; either by starting it via the `ruby_memprofiler_pprof_profile` wrapper, or by integrating `ruby_memprofiler_pprof` directly into your code.
@@ -66,3 +66,19 @@ $rmp_flusher = MemprofilerPprof::BlockFlusher.new(
 ```
 
 However, you're free to organise the calls to `#flush` however makes sense for your application.
+
+### Visualising the output
+
+It's part of this project's aim to build some tooling to easily aggregate profiles across different processes and guide app developers towards which things are having the biggest impact on memory usage. In particular, what kind of objects (and where were they allocated) increase over time, indicating a potential cause for a memory leak. However, right now, these tools don't exist yet.
+
+However, since RMP produces standard format pprof profiles, they can be viewed and analysed with any other pprof program. For example, you can get a flamegraph of allocation stacktraces for allocated or retained objects using the [Golang pprof viewer](https://pkg.go.dev/cmd/pprof), `go tool pprof`:
+
+```
+go tool pprof -http :8987 <path-to-output.pprof>
+```
+
+This will open a web UI to analyise the profile. Perhaps the most useful view is the Flame graph view ("View > Flame graph"), and you can select to view either allocated or live objects (Sample > "allocation_size" or Sample > "retained_size"). The following is an example for a profile collected after booting a large Rails app.
+
+![A big Rails profile](doc/images/go_flamegraph_example.png?raw=true "A big Rails profile")
+
+There's a huge amount to wade through here! The intention of this project is to provide some more purpose-built tools for analyisng memory use for this kind of large app from these profiles.
