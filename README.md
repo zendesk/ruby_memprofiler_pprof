@@ -82,3 +82,7 @@ This will open a web UI to analyise the profile. Perhaps the most useful view is
 ![A big Rails profile](doc/images/go_flamegraph_example.png?raw=true "A big Rails profile")
 
 There's a huge amount to wade through here! The intention of this project is to provide some more purpose-built tools for analyisng memory use for this kind of large app from these profiles.
+
+## How it works internally
+
+See [IMPLEMENTATION.md](IMPLEMENTATION.md)
