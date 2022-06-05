@@ -60,6 +60,9 @@ $VPATH << "$(srcdir)/vendor/upb/upb"
 $VPATH << "$(srcdir)/vendor/upb/third_party/utf8_range"
 $INCFLAGS << " -I#{File.join($srcdir, "vendor/upb")}"
 
+require 'backtracie/mkmf_support'
+compile_with_backtracie!
+
 dir_config('ruby')
 extname = "ruby_memprofiler_pprof/ruby_memprofiler_pprof_ext"
 unless Debase::RubyCoreSource.create_makefile_with_core(internal_headers, extname)

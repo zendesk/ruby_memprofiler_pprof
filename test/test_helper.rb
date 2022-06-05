@@ -15,7 +15,9 @@ class DecodedProfileData
     def backtrace_contains?(stack_segment)
       return false if stack_segment.size > backtrace.size
       (0..(backtrace.size - stack_segment.size)).any? do |i|
-        stack_segment.reverse == backtrace[i...(i + stack_segment.size)]
+        stack_segment.reverse.zip(backtrace[i...(i + stack_segment.size)]).all? do |test_frame, pb_frame|
+          pb_frame.include? test_frame
+        end
       end
     end
   end

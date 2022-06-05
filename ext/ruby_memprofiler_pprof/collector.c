@@ -84,11 +84,8 @@ struct collector_cdata {
     // used in backtraces, and also helps us efficiently build up the pprof protobuf format (since that
     // _requires_ that strings are interned in a string table).
     struct mpp_strtab *string_tab;
-    // Same thing, but for backtrace locations.
-    struct mpp_rb_loctab *loctab;
-
-    // Which method to use for getting backtraces
-    int bt_method;
+    // Same thing, but for function locations
+    struct mpp_functab *functab;
 
     // This we need to know so we can at least give a non-zero size for new objects.
     size_t rvalue_size;
@@ -102,7 +99,12 @@ static pthread_mutex_t global_collectors_lock;
 static void internal_sample_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
     s->refcount--;
     if (!s->refcount) {
-        mpp_rb_backtrace_destroy(cd->loctab, s->bt);
+        if (s->processed_into_functab) {
+            for (int i = 0; i < s->bt->frames_count; i++) {
+                mpp_functab_del_frame(cd->functab, &s->bt->frames[i]);
+            }
+        }
+        mpp_rb_backtrace_destroy(s->bt);
         mpp_free(s);
     }
 }
@@ -148,9 +150,9 @@ static int collector_cdata_gc_memsize_live_objects(st_data_t key, st_data_t valu
     return ST_CONTINUE;
 }
 
-static void collector_cdata_gc_free_loctab(struct collector_cdata *cd) {
-    if (cd->loctab) {
-        mpp_rb_loctab_destroy(cd->loctab);
+static void collector_cdata_gc_free_functab(struct collector_cdata *cd) {
+    if (cd->functab) {
+        mpp_functab_destroy(cd->functab);
     }
 }
 
@@ -158,6 +160,14 @@ static void collector_cdata_gc_free_strtab(struct collector_cdata *cd) {
     if (cd->string_tab) {
         mpp_strtab_destroy(cd->string_tab);
     }
+}
+
+
+
+static int collector_cdata_gc_mark_live_objects(st_data_t key, st_data_t value, st_data_t arg) {
+    struct mpp_sample *s = (struct mpp_sample *)value;
+    mpp_backtrace_gc_mark(s->bt);
+    return ST_CONTINUE;
 }
 
 static void collector_cdata_gc_mark(void *ptr) {
@@ -168,6 +178,13 @@ static void collector_cdata_gc_mark(void *ptr) {
     rb_gc_mark_movable(cd->mMemprofilerPprof);
     rb_gc_mark_movable(cd->cCollector);
     rb_gc_mark_movable(cd->cProfileData);
+
+    // Mark all the iseqs/CME's we have stored in the allocation buffer
+    for (struct mpp_sample *s = cd->allocation_samples; s; s = s->next_alloc) {
+        mpp_backtrace_gc_mark(s->bt);
+    }
+    // And also for the heap buffer
+    st_foreach(cd->heap_samples, collector_cdata_gc_mark_live_objects, 0);
 }
 
 static void collector_cdata_gc_free(void *ptr) {
@@ -186,7 +203,7 @@ static void collector_cdata_gc_free(void *ptr) {
 
     collector_cdata_gc_free_heap_samples(cd);
     collector_cdata_gc_free_allocation_samples(cd);
-    collector_cdata_gc_free_loctab(cd);
+    collector_cdata_gc_free_functab(cd);
     collector_cdata_gc_free_strtab(cd);
 
     // Remove from global collectors list.
@@ -211,8 +228,8 @@ static size_t collector_cdata_memsize(const void *ptr) {
     if (cd->string_tab) {
         sz += mpp_strtab_memsize(cd->string_tab);
     }
-    if (cd->loctab) {
-        sz += mpp_rb_loctab_memsize(cd->loctab);
+    if (cd->functab) {
+        sz += mpp_functab_memsize(cd->functab);
     }
     struct mpp_sample *s = cd->allocation_samples;
     while (s) {
@@ -229,6 +246,8 @@ static size_t collector_cdata_memsize(const void *ptr) {
 static int collector_move_each_live_object(st_data_t key, st_data_t value, st_data_t arg) {
     struct collector_cdata *cd = (struct collector_cdata *)arg;
     struct mpp_sample *sample = (struct mpp_sample *)value;
+
+    mpp_backtrace_gc_compact(sample->bt);
 
     if (rb_gc_location(sample->allocated_value_weak) == sample->allocated_value_weak) {
         return ST_CONTINUE;
@@ -247,6 +266,9 @@ static void collector_cdata_gc_compact(void *ptr) {
     cd->mMemprofilerPprof = rb_gc_location(cd->mMemprofilerPprof);
     cd->cCollector = rb_gc_location(cd->cCollector);
     cd->cProfileData = rb_gc_location(cd->cProfileData);
+    for (struct mpp_sample *s = cd->allocation_samples; s; s = s->next_alloc) {
+        mpp_backtrace_gc_compact(s->bt);
+    }
     st_foreach(cd->heap_samples, collector_move_each_live_object, (st_data_t)cd);
 }
 #endif
@@ -295,7 +317,7 @@ static VALUE collector_alloc(VALUE klass) {
     __atomic_store_n(&cd->dropped_samples_nolock, 0, __ATOMIC_SEQ_CST);
 
     cd->string_tab = NULL;
-    cd->loctab = NULL;
+    cd->functab = NULL;
 
     // Initialize the mutex.
     // It really does need to be recursive - if we call a rb_* function while holding
@@ -333,30 +355,27 @@ static VALUE collector_initialize_protected(VALUE vargs) {
     // Argument parsing
     VALUE kwargs_hash = Qnil;
     rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, args->argc, args->argv, "00:", &kwargs_hash);
-    VALUE kwarg_values[5];
-    ID kwarg_ids[5];
+    VALUE kwarg_values[4];
+    ID kwarg_ids[4];
     kwarg_ids[0] = rb_intern("sample_rate");
     kwarg_ids[1] = rb_intern("max_allocation_samples");
     kwarg_ids[2] = rb_intern("max_heap_samples");
-    kwarg_ids[3] = rb_intern("bt_method");
-    kwarg_ids[4] = rb_intern("allocation_retain_rate");
-    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 5, kwarg_values);
+    kwarg_ids[3] = rb_intern("allocation_retain_rate");
+    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 4, kwarg_values);
 
     // Default values...
     if (kwarg_values[0] == Qundef) kwarg_values[0] = DBL2NUM(0.01);
     if (kwarg_values[1] == Qundef) kwarg_values[1] = LONG2NUM(10000);
     if (kwarg_values[2] == Qundef) kwarg_values[2] = LONG2NUM(50000);
-    if (kwarg_values[3] == Qundef) kwarg_values[3] = rb_id2sym(rb_intern("cfp"));
-    if (kwarg_values[4] == Qundef) kwarg_values[4] = DBL2NUM(1);
+    if (kwarg_values[3] == Qundef) kwarg_values[3] = DBL2NUM(1);
 
     rb_funcall(args->self, rb_intern("sample_rate="), 1, kwarg_values[0]);
     rb_funcall(args->self, rb_intern("max_allocation_samples="), 1, kwarg_values[1]);
     rb_funcall(args->self, rb_intern("max_heap_samples="), 1, kwarg_values[2]);
-    rb_funcall(args->self, rb_intern("bt_method="), 1, kwarg_values[3]);
-    rb_funcall(args->self, rb_intern("allocation_retain_rate="), 1, kwarg_values[4]);
+    rb_funcall(args->self, rb_intern("allocation_retain_rate="), 1, kwarg_values[3]);
 
     cd->string_tab = mpp_strtab_new();
-    cd->loctab = mpp_rb_loctab_new(cd->string_tab);
+    cd->functab = mpp_functab_new(cd->string_tab);
     cd->allocation_samples = NULL;
     cd->allocation_samples_count = 0;
     cd->pending_size_count = 0;
@@ -475,13 +494,7 @@ struct newobj_impl_args {
 static VALUE collector_tphook_newobj_protected(VALUE args_as_uintptr) {
     struct newobj_impl_args *args = (struct newobj_impl_args*)args_as_uintptr;
     struct collector_cdata *cd = args->cd;
-    if (cd->bt_method == MPP_BT_METHOD_CFP) {
-        mpp_rb_backtrace_capture(cd->loctab, &args->bt);
-    } else if (cd->bt_method == MPP_BT_METHOD_SLOWRB) {
-        mpp_rb_backtrace_capture_slowrb(cd->loctab, &args->bt);
-    } else {
-        MPP_ASSERT_FAIL("unknown bt_method");
-    }
+    mpp_rb_backtrace_capture(&args->bt);
     args->allocation_size = cd->rvalue_size;
     return Qnil;
 }
@@ -549,6 +562,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     sample->allocation_size = args.allocation_size;
     sample->current_size = args.allocation_size;
     sample->allocated_value_weak = args.newobj;
+    sample->processed_into_functab = 0;
 
     // Insert into allocation profiling list.
     sample->next_alloc = cd->allocation_samples;
@@ -565,7 +579,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 
 out:
     // If this wasn't cleared, we need to free it.
-    if (args.bt) mpp_rb_backtrace_destroy(cd->loctab, args.bt);
+    if (args.bt) mpp_rb_backtrace_destroy(args.bt);
     // If there was an exception, ignore it and restore the original errinfo.
     if (jump_tag && original_errinfo != Qundef) rb_set_errinfo(original_errinfo);
 
@@ -825,6 +839,37 @@ static VALUE collector_flush_prepresult(VALUE vargs) {
     return profile_data;
 }
 
+static VALUE collector_add_allocation_samples_to_functab(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    for (struct mpp_sample *s = cd->allocation_samples; s; s = s->next_alloc) {
+        if (!s->processed_into_functab) {
+            for (int i = 0; i < s->bt->frames_count; i++) {
+                mpp_functab_add_frame(cd->functab, &s->bt->frames[i]);
+            }
+            s->processed_into_functab = 1;
+        }
+    }
+    return Qnil;
+}
+
+static int collector_add_heap_sample_to_functab_each(st_data_t key, st_data_t val, st_data_t arg) {
+    struct collector_cdata *cd = (struct collector_cdata *) arg;
+    struct mpp_sample *s = (struct mpp_sample *) val;
+    if (!s->processed_into_functab) {
+        for (int i = 0; i < s->bt->frames_count; i++) {
+            mpp_functab_add_frame(cd->functab, &s->bt->frames[i]);
+        }
+        s->processed_into_functab = 1;
+    }
+    return ST_CONTINUE;
+}
+
+static VALUE collector_add_heap_samples_to_functab(VALUE self) {
+    struct collector_cdata *cd = collector_cdata_get(self);
+    st_foreach(cd->heap_samples, collector_add_heap_sample_to_functab_each, (st_data_t)cd);
+    return Qnil;
+}
+
 static VALUE collector_flush(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
     struct mpp_pprof_serctx *serctx = NULL;
@@ -841,6 +886,11 @@ static VALUE collector_flush(VALUE self) {
     // Whilst under the GVL, we need to get the collector lock
     mpp_pthread_mutex_lock(&cd->lock);
     lock_held = 1;
+
+    rb_protect(collector_add_allocation_samples_to_functab, self, &jump_tag);
+    if (jump_tag) goto out;
+    rb_protect(collector_add_heap_samples_to_functab, self, &jump_tag);
+    if (jump_tag) goto out;
 
     sample_list = cd->allocation_samples;
     cd->allocation_samples = NULL;
@@ -860,10 +910,8 @@ static VALUE collector_flush(VALUE self) {
     rb_protect(collector_flush_protected_heap_sample_size, self, &jump_tag);
     if (jump_tag) goto out;
 
-    serctx = mpp_pprof_serctx_new();
-    MPP_ASSERT_MSG(serctx, "mpp_pprof_serctx_new failed??");
-    r = mpp_pprof_serctx_set_loctab(serctx, cd->loctab, errbuf, sizeof(errbuf));
-    if (r == -1) {
+    serctx = mpp_pprof_serctx_new(cd->string_tab, cd->functab, errbuf, sizeof(errbuf));
+    if (!serctx) {
         goto out;
     }
 
@@ -941,43 +989,6 @@ static VALUE collector_live_heap_samples_count(VALUE self) {
     return LONG2NUM(counter);
 }
 
-static VALUE collector_bt_method_get(VALUE self) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-
-    mpp_pthread_mutex_lock(&cd->lock);
-    int method = cd->bt_method;
-    mpp_pthread_mutex_unlock(&cd->lock);
-
-    if (method == MPP_BT_METHOD_CFP) {
-        return rb_id2sym(rb_intern("cfp"));
-    } else if (method == MPP_BT_METHOD_SLOWRB) {
-        return rb_id2sym(rb_intern("slowrb"));
-    } else {
-        MPP_ASSERT_FAIL("unknown bt_method");
-        return Qundef;
-    }
-}
-
-static VALUE collector_bt_method_set(VALUE self, VALUE newval) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-
-    ID bt_method = rb_sym2id(newval);
-    int method;
-    if (bt_method == rb_intern("cfp")) {
-        method = MPP_BT_METHOD_CFP;
-    } else if (bt_method == rb_intern("slowrb")) {
-        method = MPP_BT_METHOD_SLOWRB;
-    } else {
-        rb_raise(rb_eArgError, "passed value for bt_method was not recognised");
-    }
-
-    mpp_pthread_mutex_lock(&cd->lock);
-    cd->bt_method = method;
-    mpp_pthread_mutex_unlock(&cd->lock);
-
-    return newval;
-}
-
 static int mpp_collector_atfork_lock_el(st_data_t key, st_data_t value, st_data_t arg) {
     struct collector_cdata *cd = (struct collector_cdata *)key;
     mpp_pthread_mutex_lock(&cd->lock);
@@ -1038,8 +1049,6 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "max_allocation_samples=", collector_set_max_allocation_samples, 1);
     rb_define_method(cCollector, "max_heap_samples", collector_get_max_heap_samples, 0);
     rb_define_method(cCollector, "max_heap_samples=", collector_set_max_heap_samples, 1);
-    rb_define_method(cCollector, "bt_method", collector_bt_method_get, 0);
-    rb_define_method(cCollector, "bt_method=", collector_bt_method_set, 1);
     rb_define_method(cCollector, "allocation_retain_rate", collector_get_allocation_retain_rate, 0);
     rb_define_method(cCollector, "allocation_retain_rate=", collector_set_allocation_retain_rate, 1);
     rb_define_method(cCollector, "running?", collector_is_running, 0);

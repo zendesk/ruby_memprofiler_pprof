@@ -16,6 +16,13 @@
 #include "pprof.upb.h"
 #pragma GCC diagnostic pop
 
+#include <vm_core.h>
+#include <method.h>
+#define RUBY_MJIT_HEADER_INCLUDED
+#include <backtracie.h>
+#undef RUBY_MJIT_HEADER_INCLUDED
+
+
 // ======== COMPAT DECLARATIONS ========
 
 // For handling differences in ruby versions
@@ -164,7 +171,7 @@ void mpp_strtab_intern_cstr(
 void mpp_strtab_release(struct mpp_strtab *tab, const char *str, size_t str_len);
 void mpp_strtab_release_rbstr(struct mpp_strtab *tab, VALUE rbstr);
 
-// Methods for building a zero=-based list of interned pointers, for building the final string table
+// Methods for building a zero-based list of interned pointers, for building the final string table
 // in the pprof protobuf.
 struct mpp_strtab_index *mpp_strtab_index(struct mpp_strtab *tab);
 void mpp_strtab_index_destroy(struct mpp_strtab_index *ix);
@@ -174,19 +181,36 @@ void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *c
 
 // ======== BACKTRACE DECLARATIONS ========
 
-#define MPP_BT_METHOD_CFP 1
-#define MPP_BT_METHOD_SLOWRB 2
-
-struct mpp_rb_backtrace {
-    // The array of frames - most recent call FIRST.
-    uint64_t *frame_locations;
-    int64_t frames_count;
-    // Memory size of frames, which might actually be bigger than
-    // sizeof(frame_locations[0]) * frames_count
-    size_t memsize;
+struct mpp_rb_backtrace_frame {
+    backtracie_raw_location raw;
+    uint64_t function_id;
 };
 
-struct mpp_rb_loctab_function {
+
+struct mpp_rb_backtrace {
+    int64_t frames_count;
+    size_t frames_capacity;
+    // The array of frames - most recent call FIRST.
+    struct mpp_rb_backtrace_frame frames[];
+};
+
+void mpp_rb_backtrace_capture(struct mpp_rb_backtrace **bt_out);
+void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt);
+size_t mpp_rb_backtrace_memsize(struct mpp_rb_backtrace *bt);
+void mpp_backtrace_gc_mark(struct mpp_rb_backtrace *bt);
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+void mpp_backtrace_gc_compact(struct mpp_rb_backtrace * bt);
+#endif
+
+struct mpp_functab {
+    // The table of (uint64_t frame #object_id) -> (struct mpp_functab_func *)
+    st_table *funcs;
+    int64_t funcs_count;
+    // The string interning table that all the names are related to
+    struct mpp_strtab *strtab;
+};
+
+struct mpp_functab_func {
     // Refcount
     int refcount;
     // Interned pointer to function name
@@ -196,47 +220,17 @@ struct mpp_rb_loctab_function {
     const char *file_name;
     size_t file_name_len;
     // Line number where the function starts
-    int64_t line_number;
-    // Function ID of self
+    int line_number;
+    // Function ID of self (the CME/iseq's #object_id)
     uint64_t id;
 };
 
-struct mpp_rb_loctab_location {
-    // Refcount
-    int refcount;
-    // Function & line number. Note that we do _NOT_ hold a reference
-    // to the function here. Instead, each backtrace frame holds a reference
-    // to both the function and the location.
-    struct mpp_rb_loctab_function *function;
-    // Line number
-    int64_t line_number;
-    // Location id of self
-    uint64_t id;
-};
-
-struct mpp_rb_loctab {
-    // The table of (uint64_t location_id) -> (struct mpp_rb_loctab_location *)
-    st_table *locations;
-    int64_t location_count;
-    // The table of (uint64_t function_id) -> (struct mpp_rb_locatab_function *)
-    st_table *functions;
-    int64_t function_count;
-    // The string interning table that all the names are related to
-    struct mpp_strtab *strtab;
-};
-
-struct mpp_rb_loctab *mpp_rb_loctab_new(struct mpp_strtab *strtab);
-void mpp_rb_loctab_destroy(struct mpp_rb_loctab *loctab);
-void mpp_rb_backtrace_capture(struct mpp_rb_loctab *locatb, struct mpp_rb_backtrace **bt_out);
-void mpp_rb_backtrace_capture_slowrb(struct mpp_rb_loctab *locatb, struct mpp_rb_backtrace **bt_out);
-void mpp_rb_backtrace_destroy(struct mpp_rb_loctab *locatb, struct mpp_rb_backtrace *bt);
-size_t mpp_rb_backtrace_memsize(struct mpp_rb_backtrace *bt);
-size_t mpp_rb_loctab_memsize(struct mpp_rb_loctab *loctab);
-typedef int (*mpp_rb_loctab_each_location_cb)(struct mpp_rb_loctab *loctab, struct mpp_rb_loctab_location *loc, void *ctx);
-void mpp_rb_loctab_each_location(struct mpp_rb_loctab *loctab, mpp_rb_loctab_each_location_cb cb, void *ctx);
-typedef int (*mpp_rb_loctab_each_function_cb)(struct mpp_rb_loctab *loctab, struct mpp_rb_loctab_function *loc, void *ctx);
-void mpp_rb_loctab_each_function(struct mpp_rb_loctab *loctab, mpp_rb_loctab_each_function_cb cb, void *ctx);
-
+struct mpp_functab *mpp_functab_new(struct mpp_strtab *strtab);
+void mpp_functab_destroy(struct mpp_functab *functab);
+size_t mpp_functab_memsize(struct mpp_functab *functab);
+uint64_t mpp_functab_add_frame(struct mpp_functab *functab, struct mpp_rb_backtrace_frame *loc);
+uint64_t mpp_functab_del_frame(struct mpp_functab *functab, struct mpp_rb_backtrace_frame *loc);
+struct mpp_functab_func *mpp_functab_lookup_frame(struct mpp_functab *functab, uint64_t id);
 
 // ======= MAIN DATA STRUCTURE DECLARATIONS ========
 struct mpp_sample {
@@ -250,6 +244,9 @@ struct mpp_sample {
     size_t current_size;
     // Weak reference to what was allocated. Validate that it's alive by consulting the live object table first.
     VALUE allocated_value_weak;
+    // Whether or not this sample has been processed into the function table (i.e. we've gone and figured out
+    // names for all of its methods).
+    int processed_into_functab;
     // Next element in the allocation profiling sample list. DO NOT use this in the heap profiling table.
     struct mpp_sample *next_alloc;
 };
@@ -261,11 +258,17 @@ struct mpp_pprof_serctx {
     // freed.
     upb_alloc allocator;
     upb_Arena *arena;
-    // Location table used for looking up fucntion & location IDs to strings.
-    struct mpp_rb_loctab *loctab;
+    // Location table used for looking up fucntion IDs to strings.
+    struct mpp_functab *functab;
     // String intern index; recall that holding this object does _not_ require that we have exclusive
     // use of the underlying string intern table, so it's safe for us to use this in a separate thread.
     struct mpp_strtab_index *strindex;
+    // Map of function ID -> function protobuf
+    st_table *function_pbs;
+    // Map of (function ID, line number) -> location protobufs
+    st_table *location_pbs;
+    // Counter for assigning location IDs
+    uint64_t loc_counter;
     // The protobuf representation we are building up.
     perftools_profiles_Profile *profile_proto;
 
@@ -283,11 +286,10 @@ struct mpp_pprof_serctx {
 #define MPP_SAMPLE_TYPE_ALLOCATION 1
 #define MPP_SAMPLE_TYPE_HEAP 2
 
-struct mpp_pprof_serctx *mpp_pprof_serctx_new();
-void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
-int mpp_pprof_serctx_set_loctab(
-    struct mpp_pprof_serctx *ctx, struct mpp_rb_loctab *loctab, char *errbuf, size_t errbuflen
+struct mpp_pprof_serctx *mpp_pprof_serctx_new(
+        struct mpp_strtab *strtab, struct mpp_functab *functab, char *errbuf, size_t errbuflen
 );
+void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
 int mpp_pprof_serctx_add_sample(
     struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, int sample_type, char *errbuf, size_t errbuflen
 );

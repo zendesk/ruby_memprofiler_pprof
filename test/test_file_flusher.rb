@@ -3,6 +3,7 @@
 require_relative 'test_helper'
 require 'fileutils'
 require 'tmpdir'
+require 'logger'
 
 class FakeSleepExtension
 
@@ -32,9 +33,9 @@ describe MemprofilerPprof::FileFlusher do
   end
 
   def wait_for_file_exist(file)
-    50.times do
+    5000.times do
       return if File.exist?(file)
-      sleep 0.1
+      sleep 5
       MemprofilerPprof::BlockFlusher.advance_sleep 10
     end
     raise "File #{file} did not get created"
@@ -42,7 +43,11 @@ describe MemprofilerPprof::FileFlusher do
 
   it 'writes profiles to the directory' do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-    flusher = MemprofilerPprof::FileFlusher.new(c, pattern: "#{@dir}/%{index}.pprof", interval: 15)
+    flusher = MemprofilerPprof::FileFlusher.new(c,
+      pattern: "#{@dir}/%{index}.pprof",
+      interval: 15,
+      logger: Logger.new(STDERR)
+    )
 
     flusher.run do
       c.profile do
@@ -67,7 +72,11 @@ describe MemprofilerPprof::FileFlusher do
 
   it 'writes for both parent and child on fork' do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-    flusher = MemprofilerPprof::FileFlusher.new(c, pattern: "#{@dir}/%{pid}-%{index}.pprof", interval: 15)
+    flusher = MemprofilerPprof::FileFlusher.new(c,
+      pattern: "#{@dir}/%{pid}-%{index}.pprof",
+      interval: 15,
+      logger: Logger.new(STDERR),
+    )
 
     flusher.start!
     c.start!

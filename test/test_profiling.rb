@@ -40,43 +40,9 @@ describe MemprofilerPprof::Collector do
     assert_operator fn4_stacks.size, :>=, 1
   end
 
-  it 'captures backtraces for memory allocations in slowrb mode' do
-    def dummy_fn1
-      dummy_fn2
-    end
-
-    def dummy_fn2
-      v1 = "a" * 1024
-      v1 + dummy_fn3 + dummy_fn4
-    end
-
-    def dummy_fn3
-      SecureRandom.hex(512) + dummy_fn4
-    end
-
-    def dummy_fn4
-      'z' * 1024
-    end
-
-    c = MemprofilerPprof::Collector.new(sample_rate: 1.0, bt_method: :slowrb)
-    profile_data = c.profile do
-      xx = dummy_fn1
-    end
-
-    # Decode the sample backtraces
-    pprof = DecodedProfileData.new(profile_data)
-    fn2_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2]
-    fn3_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3]
-    fn4_stacks = pprof.samples_including_stack %w[dummy_fn1 dummy_fn2 dummy_fn3 dummy_fn4]
-
-    assert_operator fn2_stacks.size, :>=, 1
-    assert_operator fn3_stacks.size, :>=, 1
-    assert_operator fn4_stacks.size, :>=, 1
-  end
-
-  it 'captures all allocations when sample rate is 1' do
+  it 'captures all-ish allocations when sample rate is 1' do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-
+    c.max_allocation_samples = 1_000_000
     # Warm up the symbol intern cache inside GC.stat
     GC.stat(:total_allocated_objects)
 
@@ -84,14 +50,14 @@ describe MemprofilerPprof::Collector do
     objs_stop = nil
     profile_data = c.profile do
       objs_start = GC.stat(:total_allocated_objects)
-      100.times { SecureRandom.hex 50 }
+      10000.times { SecureRandom.hex 50 }
       objs_stop = GC.stat(:total_allocated_objects)
     end
 
     pprof = DecodedProfileData.new(profile_data)
     gc_stat_allocations = objs_stop - objs_start
 
-    assert_in_delta(gc_stat_allocations, pprof.total_allocations, 3)
+    assert_in_delta(gc_stat_allocations, pprof.total_allocations, 100)
   end
 
   it 'captures allocation sizes' do
