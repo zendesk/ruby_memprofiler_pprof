@@ -18,10 +18,7 @@
 
 #include <vm_core.h>
 #include <method.h>
-#define RUBY_MJIT_HEADER_INCLUDED
 #include <backtracie.h>
-#undef RUBY_MJIT_HEADER_INCLUDED
-
 
 // ======== COMPAT DECLARATIONS ========
 
@@ -180,18 +177,14 @@ typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size
 void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *ctx);
 
 // ======== BACKTRACE DECLARATIONS ========
-
-struct mpp_rb_backtrace_frame {
-    backtracie_raw_location raw;
+struct mpp_rb_backtrace_frame_extra {
     uint64_t function_id;
+    uint64_t line_number;
 };
 
-
 struct mpp_rb_backtrace {
-    int64_t frames_count;
-    size_t frames_capacity;
-    // The array of frames - most recent call FIRST.
-    struct mpp_rb_backtrace_frame frames[];
+    backtracie_bt_t backtracie;
+    struct mpp_rb_backtrace_frame_extra *frame_extras;
 };
 
 void mpp_rb_backtrace_capture(struct mpp_rb_backtrace **bt_out);
@@ -219,7 +212,7 @@ struct mpp_functab_func {
     // Interned pointer to file name
     const char *file_name;
     size_t file_name_len;
-    // Line number where the function starts
+    // Line number where the function starts - note that this is uu
     int line_number;
     // Function ID of self (the CME/iseq's #object_id)
     uint64_t id;
@@ -228,8 +221,10 @@ struct mpp_functab_func {
 struct mpp_functab *mpp_functab_new(struct mpp_strtab *strtab);
 void mpp_functab_destroy(struct mpp_functab *functab);
 size_t mpp_functab_memsize(struct mpp_functab *functab);
-uint64_t mpp_functab_add_frame(struct mpp_functab *functab, struct mpp_rb_backtrace_frame *loc);
-uint64_t mpp_functab_del_frame(struct mpp_functab *functab, struct mpp_rb_backtrace_frame *loc);
+uint64_t mpp_functab_add(struct mpp_functab *functab, uint64_t id, VALUE name, VALUE file_name, VALUE line_number);
+uint64_t mpp_functab_del(struct mpp_functab *functab, uint64_t id);
+void mpp_functab_add_all_frames(struct mpp_functab *functab, struct mpp_rb_backtrace *bt);
+void mpp_functab_del_all_frames(struct mpp_functab *functab, struct mpp_rb_backtrace *bt);
 struct mpp_functab_func *mpp_functab_lookup_frame(struct mpp_functab *functab, uint64_t id);
 
 // ======= MAIN DATA STRUCTURE DECLARATIONS ========
@@ -246,7 +241,10 @@ struct mpp_sample {
     VALUE allocated_value_weak;
     // Whether or not this sample has been processed into the function table (i.e. we've gone and figured out
     // names for all of its methods).
-    int processed_into_functab;
+    bool processed_into_functab;
+    // Whether or not this sample has been processed in a creturn hook yet (i.e. it's ready to do things like
+    // calculate size)
+    bool processed_in_creturn;
     // Next element in the allocation profiling sample list. DO NOT use this in the heap profiling table.
     struct mpp_sample *next_alloc;
 };

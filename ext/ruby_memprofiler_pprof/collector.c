@@ -34,6 +34,8 @@ struct collector_cdata {
     uint32_t u32_allocation_retain_rate;
     // This flag is used to make sure we detach our tracepoints as we're getting GC'd.
     bool is_tracing;
+    // Are we in the middle of a call to #flush?
+    bool is_flushing;
 
     // ======== Allocation samples ========
     // A linked list of samples, added to each time memory is allocated and cleared when
@@ -100,9 +102,7 @@ static void internal_sample_decrement_refcount(struct collector_cdata *cd, struc
     s->refcount--;
     if (!s->refcount) {
         if (s->processed_into_functab) {
-            for (int i = 0; i < s->bt->frames_count; i++) {
-                mpp_functab_del_frame(cd->functab, &s->bt->frames[i]);
-            }
+            mpp_functab_del_all_frames(cd->functab, s->bt);
         }
         mpp_rb_backtrace_destroy(s->bt);
         mpp_free(s);
@@ -302,6 +302,7 @@ static VALUE collector_alloc(VALUE klass) {
 
     __atomic_store_n(&cd->u32_sample_rate, 0, __ATOMIC_SEQ_CST);
     cd->is_tracing = false;
+    cd->is_flushing = false;
 
     cd->allocation_samples = NULL;
     cd->allocation_samples_count = 0;
@@ -562,7 +563,8 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     sample->allocation_size = args.allocation_size;
     sample->current_size = args.allocation_size;
     sample->allocated_value_weak = args.newobj;
-    sample->processed_into_functab = 0;
+    sample->processed_into_functab = false;
+    sample->processed_in_creturn = false;
 
     // Insert into allocation profiling list.
     sample->next_alloc = cd->allocation_samples;
@@ -619,6 +621,7 @@ static VALUE collector_tphook_creturn_protected(VALUE cdataptr) {
             collector_mark_sample_as_freed(cd, s->allocated_value_weak);
             s->allocated_value_weak = Qundef;
         }
+        s->processed_in_creturn = true;
         if (s->allocated_value_weak != Qundef) {
             s->allocation_size = rb_obj_memsize_of(s->allocated_value_weak);
             s->current_size = s->allocation_size;
@@ -776,7 +779,9 @@ static int collector_heap_samples_each_calc_size(st_data_t key, st_data_t val, s
         return ST_DELETE;
     }
 
-    sample->current_size = rb_obj_memsize_of(sample->allocated_value_weak);
+    if (sample->processed_in_creturn) {
+        sample->current_size = rb_obj_memsize_of(sample->allocated_value_weak);
+    }
     return ST_CONTINUE;
 }
 
@@ -843,9 +848,7 @@ static VALUE collector_add_allocation_samples_to_functab(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
     for (struct mpp_sample *s = cd->allocation_samples; s; s = s->next_alloc) {
         if (!s->processed_into_functab) {
-            for (int i = 0; i < s->bt->frames_count; i++) {
-                mpp_functab_add_frame(cd->functab, &s->bt->frames[i]);
-            }
+            mpp_functab_add_all_frames(cd->functab, s->bt);
             s->processed_into_functab = 1;
         }
     }
@@ -856,9 +859,7 @@ static int collector_add_heap_sample_to_functab_each(st_data_t key, st_data_t va
     struct collector_cdata *cd = (struct collector_cdata *) arg;
     struct mpp_sample *s = (struct mpp_sample *) val;
     if (!s->processed_into_functab) {
-        for (int i = 0; i < s->bt->frames_count; i++) {
-            mpp_functab_add_frame(cd->functab, &s->bt->frames[i]);
-        }
+        mpp_functab_add_all_frames(cd->functab, s->bt);
         s->processed_into_functab = 1;
     }
     return ST_CONTINUE;
@@ -886,7 +887,11 @@ static VALUE collector_flush(VALUE self) {
     // Whilst under the GVL, we need to get the collector lock
     mpp_pthread_mutex_lock(&cd->lock);
     lock_held = 1;
+    cd->is_flushing = true;
 
+    // Get the current size for everything in the live allocations table.
+    rb_protect(collector_flush_protected_heap_sample_size, self, &jump_tag);
+    if (jump_tag) goto out;
     rb_protect(collector_add_allocation_samples_to_functab, self, &jump_tag);
     if (jump_tag) goto out;
     rb_protect(collector_add_heap_samples_to_functab, self, &jump_tag);
@@ -905,10 +910,6 @@ static VALUE collector_flush(VALUE self) {
         __atomic_exchange_n(&cd->dropped_samples_allocation_bufsize, 0, __ATOMIC_SEQ_CST);
     prepresult_args.dropped_samples_heap_bufsize =
         __atomic_exchange_n(&cd->dropped_samples_heap_bufsize, 0, __ATOMIC_SEQ_CST);
-
-    // Get the current size for everything in the live allocations table.
-    rb_protect(collector_flush_protected_heap_sample_size, self, &jump_tag);
-    if (jump_tag) goto out;
 
     serctx = mpp_pprof_serctx_new(cd->string_tab, cd->functab, errbuf, sizeof(errbuf));
     if (!serctx) {
@@ -955,6 +956,7 @@ out:
     if (serctx) mpp_pprof_serctx_destroy(serctx);
     if (lock_held) mpp_pthread_mutex_unlock(&cd->lock);
     if (sample_list) internal_sample_decrement_refcount(cd, sample_list);
+    cd->is_flushing = false;
 
     // Now return-or-raise back to ruby.
     if (jump_tag) {

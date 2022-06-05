@@ -123,7 +123,7 @@ struct mpp_pprof_serctx_map_add_ctx {
     struct mpp_functab_func *func;
 
     // for add_location
-    int line_number;
+    uint64_t line_number;
     uint64_t location_id_out;
 };
 
@@ -187,30 +187,36 @@ static int mpp_pprof_serctx_add_location(st_data_t *key, st_data_t *value, st_da
 int mpp_pprof_serctx_add_sample(
     struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, int sample_type, char *errbuf, size_t errbuflen
 ) {
+    // Skip adding to this profile if frame extras haven't been collected - it'll wind up
+    // in the next profile.
+    if (!sample->bt->frame_extras) {
+        return 0;
+    }
+    uint32_t frames_count = backtracie_bt_get_frames_count(sample->bt->backtracie);
     perftools_profiles_Sample *sample_proto = perftools_profiles_Profile_add_sample(ctx->profile_proto, ctx->arena);
     uint64_t *location_ids =
-        perftools_profiles_Sample_resize_location_id(sample_proto, sample->bt->frames_count, ctx->arena);
+        perftools_profiles_Sample_resize_location_id(sample_proto, frames_count, ctx->arena);
 
     // Protobuf needs to be in most-recent-call-first, and backtracie is also in that order.
-    for (int64_t i = 0; i < sample->bt->frames_count; i++) {
-        struct mpp_rb_backtrace_frame frame = sample->bt->frames[i];
-
+    for (uint32_t i = 0; i < frames_count; i++) {
         // Create protobufs for function/location ID as needed.
         struct mpp_pprof_serctx_map_add_ctx thunkctx;
         thunkctx.ctx = ctx;
         thunkctx.errbuf = errbuf;
         thunkctx.errbuflen = errbuflen;
         thunkctx.is_error = 0;
-        thunkctx.func = mpp_functab_lookup_frame(ctx->functab, frame.function_id);
+        uint64_t function_id = sample->bt->frame_extras[i].function_id;
+        uint64_t line_number = sample->bt->frame_extras[i].line_number;
+        thunkctx.func = mpp_functab_lookup_frame(ctx->functab, function_id);
         MPP_ASSERT_MSG(thunkctx.func, "missing function ID in functab!");
         thunkctx.location_id_out = 0;
-        thunkctx.line_number = frame.raw.line_number;
+        thunkctx.line_number = line_number;
 
-        st_update(ctx->function_pbs, frame.function_id, mpp_pprof_serctx_add_function, (st_data_t)&thunkctx);
+        st_update(ctx->function_pbs, function_id, mpp_pprof_serctx_add_function, (st_data_t)&thunkctx);
         if (thunkctx.is_error) {
             return -1;
         }
-        uint64_t loc_key[2] = { frame.function_id, frame.raw.line_number };
+        uint64_t loc_key[2] = { function_id, line_number };
         st_update(ctx->location_pbs, (st_data_t)&loc_key, mpp_pprof_serctx_add_location, (st_data_t)&thunkctx);
         if (thunkctx.is_error) {
             return -1;
