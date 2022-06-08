@@ -40,8 +40,10 @@ describe MemprofilerPprof::FileFlusher do
     end
     raise "File #{file} did not get created"
   end
+  question: have you ever tried to combine freeobj tracepoints with GC.compact? I have a test which runs compaction a bunch in the profiler, and it’s failing sporadically with a segfault here:
 
-  it 'writes profiles to the directory' do
+
+    it 'writes profiles to the directory' do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
     flusher = MemprofilerPprof::FileFlusher.new(c,
       pattern: "#{@dir}/%{index}.pprof",
@@ -50,10 +52,11 @@ describe MemprofilerPprof::FileFlusher do
     )
 
     flusher.run do
+      leak_list = []
       c.profile do
-        alloc_method_1
+        leak_list << alloc_method_1
         wait_for_file_exist "#{@dir}/0.pprof"
-        alloc_method_2
+        leak_list << alloc_method_2
         wait_for_file_exist "#{@dir}/1.pprof"
       end
     end
@@ -64,10 +67,9 @@ describe MemprofilerPprof::FileFlusher do
     profile_1 = DecodedProfileData.new(File.read("#{@dir}/0.pprof"))
     profile_2 = DecodedProfileData.new(File.read("#{@dir}/1.pprof"))
 
-    assert profile_1.allocation_samples_including_stack(['alloc_method_1']).size > 0
-    assert profile_1.allocation_samples_including_stack(['alloc_method_2']).empty?
-    assert profile_2.allocation_samples_including_stack(['alloc_method_2']).size > 0
-    assert profile_2.allocation_samples_including_stack(['alloc_method_1']).empty?
+    assert profile_1.heap_samples_including_stack(['alloc_method_1']).size > 0
+    assert profile_1.heap_samples_including_stack(['alloc_method_2']).empty?
+    assert profile_2.heap_samples_including_stack(['alloc_method_2']).size > 0
   end
 
   it 'writes for both parent and child on fork' do
@@ -81,15 +83,16 @@ describe MemprofilerPprof::FileFlusher do
     flusher.start!
     c.start!
 
-    alloc_method_1
+    leak_list = []
+    leak_list << alloc_method_1
     parent_pid = Process.pid
     child_pid = fork do
       # Child process
-      alloc_method_2
+      leak_list <<  alloc_method_2
       wait_for_file_exist "#{@dir}/#{Process.pid}-0.pprof"
       exit! 0
     end
-    alloc_method_3
+    leak_list << alloc_method_3
     wait_for_file_exist "#{@dir}/#{Process.pid}-0.pprof"
 
     c.stop!
@@ -99,12 +102,12 @@ describe MemprofilerPprof::FileFlusher do
     profile_parent = DecodedProfileData.new(File.read("#{@dir}/#{parent_pid}-0.pprof"))
     profile_child = DecodedProfileData.new(File.read("#{@dir}/#{child_pid}-0.pprof"))
 
-    assert profile_parent.allocation_samples_including_stack(['alloc_method_1']).size > 0
-    assert profile_parent.allocation_samples_including_stack(['alloc_method_2']).empty?
-    assert profile_parent.allocation_samples_including_stack(['alloc_method_3']).size > 0
+    assert profile_parent.heap_samples_including_stack(['alloc_method_1']).size > 0
+    assert profile_parent.heap_samples_including_stack(['alloc_method_2']).empty?
+    assert profile_parent.heap_samples_including_stack(['alloc_method_3']).size > 0
 
-    assert profile_child.allocation_samples_including_stack(['alloc_method_1']).size > 0
-    assert profile_child.allocation_samples_including_stack(['alloc_method_2']).size > 0
-    assert profile_child.allocation_samples_including_stack(['alloc_method_3']).empty?
+    assert profile_child.heap_samples_including_stack(['alloc_method_1']).size > 0
+    assert profile_child.heap_samples_including_stack(['alloc_method_2']).size > 0
+    assert profile_child.heap_samples_including_stack(['alloc_method_3']).empty?
   end
 end

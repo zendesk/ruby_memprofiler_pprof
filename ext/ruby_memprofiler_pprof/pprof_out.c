@@ -50,33 +50,27 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new(
     ctx->profile_proto = perftools_profiles_Profile_new(ctx->arena);
     ctx->function_pbs = st_init_numtable();
     ctx->location_pbs = st_init_table(&intpair_st_hash_type);
-    ctx->functab = functab;
+    ctx->function_table = functab;
     ctx->loc_counter = 1;
 
     // Intern some strings we'll need to produce our output
-    mpp_strtab_intern_cstr(strtab, "allocations", &ctx->internstr_allocations, NULL);
     mpp_strtab_intern_cstr(strtab, "count", &ctx->internstr_count, NULL);
-    mpp_strtab_intern_cstr(strtab, "allocation_size", &ctx->internstr_allocation_size, NULL);
     mpp_strtab_intern_cstr(strtab, "bytes", &ctx->internstr_bytes, NULL);
     mpp_strtab_intern_cstr(strtab, "retained_objects", &ctx->internstr_retained_objects, NULL);
     mpp_strtab_intern_cstr(strtab, "retained_size", &ctx->internstr_retained_size, NULL);
 
     // Build up the zero-based list of strings for interning.
-    ctx->strindex = mpp_strtab_index(strtab);
-    MPP_ASSERT_MSG(ctx->strindex, "mpp_strtab_index returned 0");
+    ctx->string_intern_index = mpp_strtab_index(strtab);
+    MPP_ASSERT_MSG(ctx->string_intern_index, "mpp_strtab_index returned 0");
 
     // Set up the sample types etc.
-    perftools_profiles_ValueType *allocations_vt =
-        perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
-    perftools_profiles_ValueType *allocation_size_vt =
-        perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
     perftools_profiles_ValueType *retained_objects_vt =
         perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
     perftools_profiles_ValueType *retained_size_vt =
         perftools_profiles_Profile_add_sample_type(ctx->profile_proto, ctx->arena);
 #define VT_SET_STRINTERN_FIELD(vt, field, str)                                                              \
     do {                                                                                                    \
-        int64_t interned = mpp_strtab_index_of(ctx->strindex, (str));                                       \
+        int64_t interned = mpp_strtab_index_of(ctx->string_intern_index, (str));                                       \
         if (interned == -1) {                                                                               \
             ruby_snprintf(errbuf, errbuflen, "non-interned string %s passed for ValueType.#field", (str));  \
             mpp_pprof_serctx_destroy(ctx);                                                                  \
@@ -85,10 +79,6 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new(
         perftools_profiles_ValueType_set_##field(vt, interned);                                             \
     } while (0)
 
-    VT_SET_STRINTERN_FIELD(allocations_vt, type, ctx->internstr_allocations);
-    VT_SET_STRINTERN_FIELD(allocations_vt, unit, ctx->internstr_count);
-    VT_SET_STRINTERN_FIELD(allocation_size_vt, type, ctx->internstr_allocation_size);
-    VT_SET_STRINTERN_FIELD(allocation_size_vt, unit, ctx->internstr_bytes);
     VT_SET_STRINTERN_FIELD(retained_objects_vt, type, ctx->internstr_retained_objects);
     VT_SET_STRINTERN_FIELD(retained_objects_vt, unit, ctx->internstr_count);
     VT_SET_STRINTERN_FIELD(retained_size_vt, type, ctx->internstr_retained_size);
@@ -103,8 +93,8 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new(
 // freed and must not be dereferenced after this.
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
     upb_Arena_Free(ctx->arena);
-    if (ctx->strindex) {
-        mpp_strtab_index_destroy(ctx->strindex);
+    if (ctx->string_intern_index) {
+        mpp_strtab_index_destroy(ctx->string_intern_index);
     }
     if (ctx->function_pbs) {
         st_free_table(ctx->function_pbs);
@@ -140,7 +130,7 @@ static int mpp_pprof_serctx_add_function(st_data_t *key, st_data_t *value, st_da
 
 #define FN_SET_STRINTERN_FIELD(field, str)                                                                  \
     do {                                                                                                    \
-        int64_t interned = mpp_strtab_index_of(thunkctx->ctx->strindex, (str));                             \
+        int64_t interned = mpp_strtab_index_of(thunkctx->ctx->string_intern_index, (str));                             \
         if (interned == -1) {                                                                               \
             ruby_snprintf(                                                                                  \
                 thunkctx->errbuf, thunkctx->errbuflen,                                                      \
@@ -185,7 +175,7 @@ static int mpp_pprof_serctx_add_location(st_data_t *key, st_data_t *value, st_da
 }
 
 int mpp_pprof_serctx_add_sample(
-    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, int sample_type, char *errbuf, size_t errbuflen
+    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen
 ) {
     // Skip adding to this profile if frame extras haven't been collected - it'll wind up
     // in the next profile.
@@ -207,8 +197,8 @@ int mpp_pprof_serctx_add_sample(
         thunkctx.is_error = 0;
         uint64_t function_id = sample->bt->frame_extras[i].function_id;
         uint64_t line_number = sample->bt->frame_extras[i].line_number;
-        thunkctx.func = mpp_functab_lookup_frame(ctx->functab, function_id);
-        MPP_ASSERT_MSG(thunkctx.func, "missing function ID in functab!");
+        thunkctx.func = mpp_functab_lookup_frame(ctx->function_table, function_id);
+        MPP_ASSERT_MSG(thunkctx.func, "missing function ID in function_table!");
         thunkctx.location_id_out = 0;
         thunkctx.line_number = line_number;
 
@@ -225,23 +215,9 @@ int mpp_pprof_serctx_add_sample(
         location_ids[i] = thunkctx.location_id_out;
     }
 
-    // Values are (allocation_count, allocation_size, retained_count, retained_size).
-    int64_t allocation_count = 0;
-    int64_t allocation_size = 0;
-    int64_t retained_count = 0;
-    int64_t retained_size = 0;
-    if (sample_type == MPP_SAMPLE_TYPE_ALLOCATION) {
-        allocation_count = 1;
-        allocation_size = (int64_t)sample->allocation_size;
-    }
-    if (sample_type == MPP_SAMPLE_TYPE_HEAP) {
-        retained_count = 1;
-        retained_size = (int64_t)sample->current_size;
-    }
-    perftools_profiles_Sample_add_value(sample_proto, allocation_count, ctx->arena);
-    perftools_profiles_Sample_add_value(sample_proto, allocation_size, ctx->arena);
-    perftools_profiles_Sample_add_value(sample_proto, retained_count, ctx->arena);
-    perftools_profiles_Sample_add_value(sample_proto, retained_size, ctx->arena);
+    // Values are (retained_count, retained_size).
+    perftools_profiles_Sample_add_value(sample_proto, 1, ctx->arena);
+    perftools_profiles_Sample_add_value(sample_proto, (int64_t)sample->current_size, ctx->arena);
     return 0;
 }
 
@@ -256,10 +232,10 @@ int mpp_pprof_serctx_serialize(
 ) {
     // Include the string table in the output
     upb_StringView *stringtab_list_proto =
-        perftools_profiles_Profile_resize_string_table(ctx->profile_proto, ctx->strindex->str_list_len, ctx->arena);
-    for (int64_t i = 0; i < ctx->strindex->str_list_len; i++) {
+        perftools_profiles_Profile_resize_string_table(ctx->profile_proto, ctx->string_intern_index->str_list_len, ctx->arena);
+    for (int64_t i = 0; i < ctx->string_intern_index->str_list_len; i++) {
         upb_StringView *stringtab_proto = &stringtab_list_proto[i];
-        struct mpp_strtab_el *intern_tab_el = ctx->strindex->str_list[i];
+        struct mpp_strtab_el *intern_tab_el = ctx->string_intern_index->str_list[i];
         stringtab_proto->data = intern_tab_el->str;
         stringtab_proto->size = intern_tab_el->str_len;
     }

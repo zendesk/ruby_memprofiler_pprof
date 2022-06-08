@@ -50,24 +50,9 @@ class DecodedProfileData
         s.backtrace << fn_name
         s.line_backtrace << "#{filename}:#{line_no} in #{fn_name}"
       end
-      s.allocations = sample_proto.value[0]
-      s.allocation_size = sample_proto.value[1]
-      s.retained_objects = sample_proto.value[2]
-      s.retained_size = sample_proto.value[3]
+      s.retained_objects = sample_proto.value[0]
+      s.retained_size = sample_proto.value[1]
       s
-    end
-  end
-
-  def total_allocations
-    @samples.reduce(0) { |acc, s| acc += s.allocations }
-  end
-
-  def total_allocation_size(under: nil)
-    @samples.reduce(0) do |acc, s|
-      if under
-        next acc unless s.backtrace_contains? [under]
-      end
-      acc += s.allocation_size
     end
   end
 
@@ -75,18 +60,23 @@ class DecodedProfileData
     @samples.select { |s| s.backtrace_contains? stack_segment }
   end
 
-  def allocation_samples_including_stack(stack_segment)
-    @samples.select { |s| s.backtrace_contains?(stack_segment) && s.allocations > 0 }
-  end
-
   def heap_samples_including_stack(stack_segment)
     @samples.select { |s| s.backtrace_contains?(stack_segment) && s.retained_objects > 0 }
   end
 
-
-  def allocation_samples
-    @samples.select { |s| s.allocations > 0 }
+  def total_retained_objects
+    @samples.reduce(0) { |acc, s| acc + s.retained_objects }
   end
+
+  def total_retained_size(under: nil)
+    @samples.reduce(0) do |acc, s|
+      if under
+        next acc unless s.backtrace_contains? [under]
+      end
+      acc + s.retained_size
+    end
+  end
+
 
   if Gem::Version.new(RUBY_VERSION) < Gem::Version.new("2.7")
     def method_missing(m, *args, &blk)

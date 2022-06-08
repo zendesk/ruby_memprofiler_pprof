@@ -4,6 +4,10 @@
 
 #include "ruby_memprofiler_pprof.h"
 
+// The reason for this super-awkward calling convention is that it calls backtracie_bt_capture(),
+// which calls into some ruby methods, which might raise. If that happens, we need to make it possible
+// to free the allocated memory from the longjmp handler;  hence, **bt_out.
+// TODO: move the rb_protect into here so it cleans up after itself instead.
 void mpp_rb_backtrace_capture(struct mpp_rb_backtrace **bt_out) {
     *bt_out = mpp_xmalloc(sizeof(struct mpp_rb_backtrace));
     (*bt_out)->frame_extras = NULL;
@@ -21,7 +25,7 @@ void mpp_rb_backtrace_destroy(struct mpp_rb_backtrace *bt) {
 size_t mpp_rb_backtrace_memsize(struct mpp_rb_backtrace *bt) {
     return sizeof(struct mpp_rb_backtrace) +
             backtracie_bt_memsize(bt->backtracie) +
-            backtracie_bt_get_frames_count(bt->backtracie) * sizeof(uint64_t);
+            backtracie_bt_get_frames_count(bt->backtracie) * sizeof(struct mpp_rb_backtrace_frame_extra);
 }
 
 struct mpp_functab *mpp_functab_new(struct mpp_strtab *strtab) {

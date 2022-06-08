@@ -23,43 +23,11 @@ struct collector_cdata {
     // Ruby Tracepoint objects for our hooks
     VALUE newobj_trace;
     VALUE freeobj_trace;
-    VALUE creturn_trace;
 
-    // How often (as a fraction of UINT32_MAX) we should sample allocations;
-    // Must be accessed through atomics
+    // How often (as a fraction of UINT32_MAX) we should sample allocations
     uint32_t u32_sample_rate;
-    // How often (as a fraction of UINT32_MAX) we should retain allocations, to profile allocations
-    // as well as just heap usage.
-    // Does _NOT_ need to be accessed through atomics.
-    uint32_t u32_allocation_retain_rate;
     // This flag is used to make sure we detach our tracepoints as we're getting GC'd.
     bool is_tracing;
-    // Are we in the middle of a call to #flush?
-    bool is_flushing;
-
-    // ======== Allocation samples ========
-    // A linked list of samples, added to each time memory is allocated and cleared when
-    // #flush is called.
-    struct mpp_sample *allocation_samples;
-    // Number of elements currently in the list
-    int64_t allocation_samples_count;
-    // How big the linked list can grow
-    int64_t max_allocation_samples;
-    // When objects are first allocated, we won't actually know their _real_ size; the object is not
-    // in a state where calling rb_obj_memsize_of() on it is well-defined. Among other things, if the
-    // object is T_CLASS, the ivar table won't be initialized yet, and trying to get its size will crash.
-    // Even if it _did_ work (which it did, in versions of Ruby before variable-sized RValues), calling
-    // rb_obj_memsize_of() will return sizeof(RVALUE). If e.g. a T_STRING is being allocated,
-    // the heap memory for that is actually only allocated _after_ the newobj tracepoint fires.
-    //
-    // To make sure we can see the "real" size of these, we add a tracepoint on CRETURN. When that hook
-    // fires, we check the size of all (still-live) objects recently allocated, and store _that_ as
-    // the allocation size. This works well for T_STRING, T_DATA, T_STRUCT's etc that are allocated
-    // inside C and then immediately filled; the correct memsize will be recorded on them before the
-    // Ruby backtrace even changes.
-    // This counter therefore keeps track of how many elements of *allocation_samples have yet to have
-    // this hook called on them.
-    int64_t pending_size_count;
 
     // ======== Heap samples ========
     // A hash-table keying live VALUEs to their allocation sample. This is _not_ cleared
@@ -72,25 +40,15 @@ struct collector_cdata {
     int64_t max_heap_samples;
 
     // ======== Sample drop counters ========
-    // These are all accessed via atomics; how else would we have a counter for how often we failed
-    // to acquire the lock?
-    //
-    // Number of samples dropped for want of obtaining the lock.
-    int64_t dropped_samples_nolock;
-    // Number of samples dropped for want of space in the allocation buffer.
-    int64_t dropped_samples_allocation_bufsize;
     // Number of samples dropped for want of space in the heap allocation table.
     int64_t dropped_samples_heap_bufsize;
 
     // String interning table used to keep constant pointers to every string; this saves memory
     // used in backtraces, and also helps us efficiently build up the pprof protobuf format (since that
     // _requires_ that strings are interned in a string table).
-    struct mpp_strtab *string_tab;
+    struct mpp_strtab *string_table;
     // Same thing, but for function locations
-    struct mpp_functab *functab;
-
-    // This we need to know so we can at least give a non-zero size for new objects.
-    size_t rvalue_size;
+    struct mpp_functab *function_table;
 };
 
 // We need a global list of all collectors, so that, in our atfork handler, we can correctly lock/unlock
@@ -98,21 +56,30 @@ struct collector_cdata {
 static st_table *global_collectors;
 static pthread_mutex_t global_collectors_lock;
 
-static void internal_sample_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
-    s->refcount--;
-    if (!s->refcount) {
-        if (s->processed_into_functab) {
-            mpp_functab_del_all_frames(cd->functab, s->bt);
-        }
-        mpp_rb_backtrace_destroy(s->bt);
-        mpp_free(s);
+static void sample_free(struct collector_cdata *cd, struct mpp_sample *s) {
+    if (s->processed_into_functab) {
+        mpp_functab_del_all_frames(cd->function_table, s->bt);
+    }
+    mpp_rb_backtrace_destroy(s->bt);
+    mpp_free(s);
+}
+
+static void sample_refcount_inc(struct mpp_sample *sample) {
+    MPP_ASSERT_MSG(sample->refcount, "sample refcount went from zero to one!");
+    sample->refcount++;
+}
+
+static void sample_refcount_dec(struct collector_cdata *cd, struct mpp_sample *sample) {
+    sample->refcount--;
+    if (!sample->refcount) {
+        sample_free(cd, sample);
     }
 }
 
 static int collector_cdata_gc_decrement_live_object_refcounts(st_data_t key, st_data_t value, st_data_t arg) {
     struct mpp_sample *s = (struct mpp_sample *)value;
     struct collector_cdata *cd = (struct collector_cdata *)arg;
-    internal_sample_decrement_refcount(cd, s);
+    sample_refcount_dec(cd, s);
     return ST_CONTINUE;
 }
 
@@ -124,47 +91,15 @@ static void collector_cdata_gc_free_heap_samples(struct collector_cdata *cd) {
     cd->heap_samples = NULL;
 }
 
-static void internal_sample_list_decrement_refcount(struct collector_cdata *cd, struct mpp_sample *s) {
-    while (s) {
-        struct mpp_sample *next_s = s->next_alloc;
-        internal_sample_decrement_refcount(cd, s);
-        s = next_s;
-    }
-}
-
-static void collector_cdata_gc_free_allocation_samples(struct collector_cdata *cd) {
-    internal_sample_list_decrement_refcount(cd, cd->allocation_samples);
-    cd->allocation_samples = NULL;
-}
-
 static int collector_cdata_gc_memsize_live_objects(st_data_t key, st_data_t value, st_data_t arg) {
     size_t *acc_ptr = (size_t *)arg;
     struct mpp_sample *s = (struct mpp_sample *)value;
-
-    // Only consider the live object list to be holding the backtrace, for accounting purposes, if it's
-    // not also in the allocation sample list.
-    if (s->refcount == 1) {
-        *acc_ptr += sizeof(*s);
-        *acc_ptr += mpp_rb_backtrace_memsize(s->bt);
-    }
+    *acc_ptr += sizeof(*s);
+    *acc_ptr += mpp_rb_backtrace_memsize(s->bt);
     return ST_CONTINUE;
 }
 
-static void collector_cdata_gc_free_functab(struct collector_cdata *cd) {
-    if (cd->functab) {
-        mpp_functab_destroy(cd->functab);
-    }
-}
-
-static void collector_cdata_gc_free_strtab(struct collector_cdata *cd) {
-    if (cd->string_tab) {
-        mpp_strtab_destroy(cd->string_tab);
-    }
-}
-
-
-
-static int collector_cdata_gc_mark_live_objects(st_data_t key, st_data_t value, st_data_t arg) {
+static int collector_cdata_gc_mark_heap_samples(st_data_t key, st_data_t value, st_data_t arg) {
     struct mpp_sample *s = (struct mpp_sample *)value;
     mpp_backtrace_gc_mark(s->bt);
     return ST_CONTINUE;
@@ -174,17 +109,12 @@ static void collector_cdata_gc_mark(void *ptr) {
     struct collector_cdata *cd = (struct collector_cdata *)ptr;
     rb_gc_mark_movable(cd->newobj_trace);
     rb_gc_mark_movable(cd->freeobj_trace);
-    rb_gc_mark_movable(cd->creturn_trace);
     rb_gc_mark_movable(cd->mMemprofilerPprof);
     rb_gc_mark_movable(cd->cCollector);
     rb_gc_mark_movable(cd->cProfileData);
 
-    // Mark all the iseqs/CME's we have stored in the allocation buffer
-    for (struct mpp_sample *s = cd->allocation_samples; s; s = s->next_alloc) {
-        mpp_backtrace_gc_mark(s->bt);
-    }
-    // And also for the heap buffer
-    st_foreach(cd->heap_samples, collector_cdata_gc_mark_live_objects, 0);
+    // Mark all the iseqs/CME's we have stored in the heap sample map
+    st_foreach(cd->heap_samples, collector_cdata_gc_mark_heap_samples, 0);
 }
 
 static void collector_cdata_gc_free(void *ptr) {
@@ -202,9 +132,12 @@ static void collector_cdata_gc_free(void *ptr) {
     mpp_pthread_mutex_lock(&cd->lock);
 
     collector_cdata_gc_free_heap_samples(cd);
-    collector_cdata_gc_free_allocation_samples(cd);
-    collector_cdata_gc_free_functab(cd);
-    collector_cdata_gc_free_strtab(cd);
+    if (cd->function_table) {
+        mpp_functab_destroy(cd->function_table);
+    }
+    if (cd->string_table) {
+        mpp_strtab_destroy(cd->string_table);
+    }
 
     // Remove from global collectors list.
     mpp_pthread_mutex_lock(&global_collectors_lock);
@@ -225,17 +158,11 @@ static size_t collector_cdata_memsize(const void *ptr) {
         st_foreach(cd->heap_samples, collector_cdata_gc_memsize_live_objects, (st_data_t)&sz);
         sz += st_memsize(cd->heap_samples);
     }
-    if (cd->string_tab) {
-        sz += mpp_strtab_memsize(cd->string_tab);
+    if (cd->string_table) {
+        sz += mpp_strtab_memsize(cd->string_table);
     }
-    if (cd->functab) {
-        sz += mpp_functab_memsize(cd->functab);
-    }
-    struct mpp_sample *s = cd->allocation_samples;
-    while (s) {
-        sz += sizeof(*s);
-        sz += mpp_rb_backtrace_memsize(s->bt);
-        s = s->next_alloc;
+    if (cd->function_table) {
+        sz += mpp_functab_memsize(cd->function_table);
     }
 
     return sz;
@@ -243,12 +170,14 @@ static size_t collector_cdata_memsize(const void *ptr) {
 
 #ifdef HAVE_RB_GC_MARK_MOVABLE
 // Support VALUES we're tracking being moved away in Ruby 2.7+ with GC.compact
-static int collector_move_each_live_object(st_data_t key, st_data_t value, st_data_t arg) {
+static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st_data_t arg) {
     struct collector_cdata *cd = (struct collector_cdata *)arg;
     struct mpp_sample *sample = (struct mpp_sample *)value;
 
+    // Handle compaction of the heap samples themselves
     mpp_backtrace_gc_compact(sample->bt);
 
+    // Handle compaction of our weak reference to the heap sample.
     if (rb_gc_location(sample->allocated_value_weak) == sample->allocated_value_weak) {
         return ST_CONTINUE;
     } else {
@@ -262,14 +191,10 @@ static void collector_cdata_gc_compact(void *ptr) {
     struct collector_cdata *cd = (struct collector_cdata *)ptr;
     cd->newobj_trace = rb_gc_location(cd->newobj_trace);
     cd->freeobj_trace = rb_gc_location(cd->freeobj_trace);
-    cd->creturn_trace = rb_gc_location(cd->creturn_trace);
     cd->mMemprofilerPprof = rb_gc_location(cd->mMemprofilerPprof);
     cd->cCollector = rb_gc_location(cd->cCollector);
     cd->cProfileData = rb_gc_location(cd->cProfileData);
-    for (struct mpp_sample *s = cd->allocation_samples; s; s = s->next_alloc) {
-        mpp_backtrace_gc_compact(s->bt);
-    }
-    st_foreach(cd->heap_samples, collector_move_each_live_object, (st_data_t)cd);
+    st_foreach(cd->heap_samples, collector_compact_each_heap_sample, (st_data_t)cd);
 }
 #endif
 
@@ -298,27 +223,15 @@ static VALUE collector_alloc(VALUE klass) {
 
     cd->newobj_trace = Qnil;
     cd->freeobj_trace = Qnil;
-    cd->creturn_trace = Qnil;
 
-    __atomic_store_n(&cd->u32_sample_rate, 0, __ATOMIC_SEQ_CST);
+    cd->u32_sample_rate = 0;
     cd->is_tracing = false;
-    cd->is_flushing = false;
-
-    cd->allocation_samples = NULL;
-    cd->allocation_samples_count = 0;
-    cd->max_allocation_samples = 0;
-    cd->pending_size_count = 0;
-
     cd->heap_samples = NULL;
     cd->heap_samples_count = 0;
     cd->max_heap_samples = 0;
-
-    __atomic_store_n(&cd->dropped_samples_allocation_bufsize, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&cd->dropped_samples_heap_bufsize, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&cd->dropped_samples_nolock, 0, __ATOMIC_SEQ_CST);
-
-    cd->string_tab = NULL;
-    cd->functab = NULL;
+    cd->dropped_samples_heap_bufsize = 0;
+    cd->string_table = NULL;
+    cd->function_table = NULL;
 
     // Initialize the mutex.
     // It really does need to be recursive - if we call a rb_* function while holding
@@ -356,35 +269,23 @@ static VALUE collector_initialize_protected(VALUE vargs) {
     // Argument parsing
     VALUE kwargs_hash = Qnil;
     rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, args->argc, args->argv, "00:", &kwargs_hash);
-    VALUE kwarg_values[4];
-    ID kwarg_ids[4];
+    VALUE kwarg_values[2];
+    ID kwarg_ids[2];
     kwarg_ids[0] = rb_intern("sample_rate");
-    kwarg_ids[1] = rb_intern("max_allocation_samples");
-    kwarg_ids[2] = rb_intern("max_heap_samples");
-    kwarg_ids[3] = rb_intern("allocation_retain_rate");
-    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 4, kwarg_values);
+    kwarg_ids[1] = rb_intern("max_heap_samples");
+    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 2, kwarg_values);
 
     // Default values...
     if (kwarg_values[0] == Qundef) kwarg_values[0] = DBL2NUM(0.01);
-    if (kwarg_values[1] == Qundef) kwarg_values[1] = LONG2NUM(10000);
-    if (kwarg_values[2] == Qundef) kwarg_values[2] = LONG2NUM(50000);
-    if (kwarg_values[3] == Qundef) kwarg_values[3] = DBL2NUM(1);
+    if (kwarg_values[1] == Qundef) kwarg_values[1] = LONG2NUM(50000);
 
     rb_funcall(args->self, rb_intern("sample_rate="), 1, kwarg_values[0]);
-    rb_funcall(args->self, rb_intern("max_allocation_samples="), 1, kwarg_values[1]);
-    rb_funcall(args->self, rb_intern("max_heap_samples="), 1, kwarg_values[2]);
-    rb_funcall(args->self, rb_intern("allocation_retain_rate="), 1, kwarg_values[3]);
+    rb_funcall(args->self, rb_intern("max_heap_samples="), 1, kwarg_values[1]);
 
-    cd->string_tab = mpp_strtab_new();
-    cd->functab = mpp_functab_new(cd->string_tab);
-    cd->allocation_samples = NULL;
-    cd->allocation_samples_count = 0;
-    cd->pending_size_count = 0;
+    cd->string_table = mpp_strtab_new();
+    cd->function_table = mpp_functab_new(cd->string_table);
     cd->heap_samples = st_init_numtable();
     cd->heap_samples_count = 0;
-
-    VALUE internal_constants = rb_const_get(rb_mGC, rb_intern("INTERNAL_CONSTANTS"));
-    cd->rvalue_size = NUM2LONG(rb_hash_aref(internal_constants, rb_id2sym(rb_intern("RVALUE_SIZE"))));
 
     return Qnil;
 }
@@ -407,8 +308,10 @@ static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
 
 static VALUE collector_get_sample_rate(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
-    uint32_t sample_rate = __atomic_load_n(&cd->u32_sample_rate, __ATOMIC_SEQ_CST);
-    return DBL2NUM(((double)sample_rate)/UINT32_MAX);
+    mpp_pthread_mutex_lock(&cd->lock);
+    uint32_t u32_sample_rate = cd->u32_sample_rate;
+    mpp_pthread_mutex_unlock(&cd->lock);
+    return DBL2NUM(((double)u32_sample_rate)/UINT32_MAX);
 }
 
 static VALUE collector_set_sample_rate(VALUE self, VALUE newval) {
@@ -416,41 +319,11 @@ static VALUE collector_set_sample_rate(VALUE self, VALUE newval) {
     double dbl_sample_rate = NUM2DBL(newval);
     // Convert the double sample rate (between 0 and 1) to a value between 0 and UINT32_MAX
     uint32_t new_sample_rate_uint = UINT32_MAX * dbl_sample_rate;
-    __atomic_store_n(&cd->u32_sample_rate, new_sample_rate_uint, __ATOMIC_SEQ_CST);
-    return newval;
-}
 
-static VALUE collector_get_allocation_retain_rate(VALUE self) {
-    struct collector_cdata *cd = collector_cdata_get(self);
     mpp_pthread_mutex_lock(&cd->lock);
-    uint32_t retain_rate_u32 = cd->u32_allocation_retain_rate;
+    cd->u32_sample_rate = new_sample_rate_uint;
     mpp_pthread_mutex_unlock(&cd->lock);
-    return DBL2NUM(((double)retain_rate_u32)/UINT32_MAX);
-}
 
-static VALUE collector_set_allocation_retain_rate(VALUE self, VALUE newval) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-    uint32_t retain_rate_u32 = UINT32_MAX * NUM2DBL(newval);
-    mpp_pthread_mutex_lock(&cd->lock);
-    cd->u32_allocation_retain_rate = retain_rate_u32;
-    mpp_pthread_mutex_unlock(&cd->lock);
-    return newval;
-}
-
-static VALUE collector_get_max_allocation_samples(VALUE self) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-    mpp_pthread_mutex_lock(&cd->lock);
-    int64_t v = cd->max_allocation_samples;
-    mpp_pthread_mutex_unlock(&cd->lock);
-    return LONG2NUM(v);
-}
-
-static VALUE collector_set_max_allocation_samples(VALUE self, VALUE newval) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-    int64_t v = NUM2LONG(newval);
-    mpp_pthread_mutex_lock(&cd->lock);
-    cd->max_allocation_samples = v;
-    mpp_pthread_mutex_unlock(&cd->lock);
     return newval;
 }
 
@@ -474,42 +347,34 @@ static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval) {
 static void collector_mark_sample_as_freed(struct collector_cdata *cd, VALUE freed_obj) {
     struct mpp_sample *sample;
     if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
-        // Clear out the reference to it
-        sample->allocated_value_weak = Qundef;
-        // We deleted it out of live objects; decrement its refcount.
-        internal_sample_decrement_refcount(cd, sample);
+        // We deleted it out of live objects; free the sample
+        sample_refcount_dec(cd, sample);
+        sample->freed_by_ruby = true;
         cd->heap_samples_count--;
     }
 }
 
-
 struct newobj_impl_args {
-    struct collector_cdata *cd;
     struct mpp_rb_backtrace *bt;
-    VALUE tpval;
-    VALUE newobj;
-    size_t allocation_size;
 };
 
 // Collects all the parts of collector_tphook_newobj that could throw.
 static VALUE collector_tphook_newobj_protected(VALUE args_as_uintptr) {
     struct newobj_impl_args *args = (struct newobj_impl_args*)args_as_uintptr;
-    struct collector_cdata *cd = args->cd;
     mpp_rb_backtrace_capture(&args->bt);
-    args->allocation_size = cd->rvalue_size;
     return Qnil;
 }
 
 static void collector_tphook_newobj(VALUE tpval, void *data) {
     struct collector_cdata *cd = (struct collector_cdata *)data;
-    struct newobj_impl_args args;
-    args.cd = cd;
-    args.tpval = tpval;
-    args.bt = NULL;
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
-    args.newobj = rb_tracearg_object(tparg);
-    int jump_tag = 0;
+    VALUE newobj = rb_tracearg_object(tparg);
+
+    // These need to be initialized up here so that they're properly zero-initialized if
+    // we goto out before they're otherwise filled.
+    struct newobj_impl_args args = { .bt = NULL };
     VALUE original_errinfo = Qundef;
+    int jump_tag = 0;
 
     mpp_pthread_mutex_lock(&cd->lock);
 
@@ -518,25 +383,19 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     // simply free some kinds of internal objects (such as T_IMEMOs) by simply setting the flags value on it
     // to zero, without invoking the GC and without calling any kind of hook. So, we need to detect when such
     // an object is freed and then the RVALUE is re-used for a new object to track it appropriately.
-    collector_mark_sample_as_freed(cd, args.newobj);
+    collector_mark_sample_as_freed(cd, newobj);
 
     // Skip the rest of this method if we're not sampling.
-    uint32_t sample_rate = __atomic_load_n(&cd->u32_sample_rate, __ATOMIC_SEQ_CST);
-    if (mpp_rand() > sample_rate) {
+    if (mpp_rand() > cd->u32_sample_rate) {
        goto out;
     }
-
-    // Make sure there's enough space in our buffers.
-    if (cd->allocation_samples_count >= cd->max_allocation_samples) {
-        __atomic_add_fetch(&cd->dropped_samples_allocation_bufsize, 1, __ATOMIC_SEQ_CST);
-        goto out;
-    }
+    // Make sure there's enough space in our buffer
     if (cd->heap_samples_count >= cd->max_heap_samples) {
-        __atomic_add_fetch(&cd->dropped_samples_heap_bufsize, 1, __ATOMIC_SEQ_CST);
+        cd->dropped_samples_heap_bufsize++;
         goto out;
     }
 
-    // OK - run our code in here under rb_protect now so that it cannot longjmp out
+    // OK - run our backtrace collection in here under rb_protect now so that it cannot longjmp out
     original_errinfo = rb_errinfo();
     rb_protect(collector_tphook_newobj_protected, (VALUE)&args, &jump_tag);
     if (jump_tag) goto out;
@@ -545,35 +404,21 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     // inside the rb_protect actually does RVALUE allocations itself, and so recursively runs this hook
     // (which will work, because the &cd->lock mutex is recursive). So, we need to actually check
     // our buffer sizes _again_.
-    if (cd->allocation_samples_count >= cd->max_allocation_samples) {
-        __atomic_add_fetch(&cd->dropped_samples_allocation_bufsize, 1, __ATOMIC_SEQ_CST);
-        goto out;
-    }
     if (cd->heap_samples_count >= cd->max_heap_samples) {
-        __atomic_add_fetch(&cd->dropped_samples_heap_bufsize, 1, __ATOMIC_SEQ_CST);
+        cd->dropped_samples_heap_bufsize++;
         goto out;
     }
 
-    // OK, now it's time to add to our sample buffers.
+    // OK, now it's time to add to our sample buffer.
     struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
-    // Set the sample refcount to two. Once because it's going in the allocation sampling buffer,
-    // and once because it's going in the heap profiling set.
-    sample->refcount = 2;
     sample->bt = args.bt;
-    sample->allocation_size = args.allocation_size;
-    sample->current_size = args.allocation_size;
-    sample->allocated_value_weak = args.newobj;
+    sample->allocated_value_weak = newobj;
     sample->processed_into_functab = false;
-    sample->processed_in_creturn = false;
+    sample->freed_by_ruby = false;
+    sample->refcount = 1;
 
-    // Insert into allocation profiling list.
-    sample->next_alloc = cd->allocation_samples;
-    cd->allocation_samples = sample;
-    cd->allocation_samples_count++;
-    cd->pending_size_count++;
-
-    // Also insert into live object list
-    st_insert(cd->heap_samples, args.newobj, (st_data_t)sample);
+    // insert into live sample map
+    st_insert(cd->heap_samples, newobj, (st_data_t)sample);
     cd->heap_samples_count++;
 
     // Clear args.bt so it doesn't get free'd below.
@@ -604,69 +449,6 @@ static void collector_tphook_freeobj(VALUE tpval, void *data) {
     mpp_pthread_mutex_unlock(&cd->lock);
 }
 
-static VALUE collector_tphook_creturn_protected(VALUE cdataptr) {
-    struct collector_cdata *cd = (struct collector_cdata *)cdataptr;
-
-    struct mpp_sample *s = cd->allocation_samples;
-    struct mpp_sample **prev_slot = &cd->allocation_samples;
-    for (int64_t i = 0; i < cd->pending_size_count; i++) {
-        MPP_ASSERT_MSG(s, "More pending size samples than samples in linked list??");
-        // Ruby apparently has the right to free stuff that's used internally (like T_IMEMOs)
-        // _without_ invoking the garbage collector (and thus, _without_ invoking our hook). When
-        // it does that, it will set flags of the RVALUE to zero, which indicates that the object
-        // is now free.
-        // Detect this and consider it the same as free'ing an object. Otherwise, we might try and
-        // memsize() it, which will cause an rb_bug to trigger
-        if (RB_TYPE_P(s->allocated_value_weak, T_NONE)) {
-            collector_mark_sample_as_freed(cd, s->allocated_value_weak);
-            s->allocated_value_weak = Qundef;
-        }
-        s->processed_in_creturn = true;
-        if (s->allocated_value_weak != Qundef) {
-            s->allocation_size = rb_obj_memsize_of(s->allocated_value_weak);
-            s->current_size = s->allocation_size;
-        }
-
-        if (mpp_rand() > cd->u32_allocation_retain_rate) {
-            // Drop this sample out of the allocation sample list. We've been asked to drop a certain
-            // percentage of things out of this list, so we don't OOM with piles of short-lived objects.
-            *prev_slot = s->next_alloc;
-
-            // Annoying little dance here so we don't read s->next_alloc after freeing s.
-            struct mpp_sample *next_s = s->next_alloc;
-            internal_sample_decrement_refcount(cd, s);
-            s = next_s;
-
-            cd->allocation_samples_count--;
-        } else {
-            prev_slot = &s->next_alloc;
-            s = s->next_alloc;
-        }
-    }
-    return Qnil;
-}
-
-static void collector_tphook_creturn(VALUE tpval, void *data) {
-    struct collector_cdata *cd = (struct collector_cdata *)data;
-    int jump_tag = 0;
-    VALUE original_errinfo;
-    // If we can't get the lock this time round, we can just do it later.
-    if (mpp_pthread_mutex_trylock(&cd->lock) != 0) {
-        return;
-    }
-    if (cd->pending_size_count == 0) goto out;
-
-    original_errinfo = rb_errinfo();
-    rb_protect(collector_tphook_creturn_protected, (VALUE)cd, &jump_tag);
-    cd->pending_size_count = 0;
-    if (jump_tag) {
-        rb_set_errinfo(original_errinfo);
-    }
-
-out:
-    mpp_pthread_mutex_unlock(&cd->lock);
-}
-
 static VALUE collector_start_protected(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
 
@@ -680,15 +462,9 @@ static VALUE collector_start_protected(VALUE self) {
             0, RUBY_INTERNAL_EVENT_FREEOBJ, collector_tphook_freeobj, cd
         );
     }
-    if (cd->creturn_trace == Qnil) {
-        cd->creturn_trace = rb_tracepoint_new(
-            0, RUBY_EVENT_C_RETURN, collector_tphook_creturn, cd
-        );
-    }
 
     rb_tracepoint_enable(cd->newobj_trace);
     rb_tracepoint_enable(cd->freeobj_trace);
-    rb_tracepoint_enable(cd->creturn_trace);
     return Qnil;
 }
 
@@ -704,18 +480,10 @@ static VALUE collector_start(VALUE self) {
         cd->heap_samples = st_init_numtable();
         cd->heap_samples_count = 0;
     }
-    if (cd->allocation_samples_count > 0) {
-        collector_cdata_gc_free_allocation_samples(cd);
-        cd->allocation_samples = NULL;
-        cd->allocation_samples_count = 0;
-        cd->pending_size_count = 0;
-    }
     cd->is_tracing = true;
-    __atomic_store_n(&cd->dropped_samples_allocation_bufsize, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&cd->dropped_samples_heap_bufsize, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&cd->dropped_samples_nolock, 0, __ATOMIC_SEQ_CST);
+    cd->dropped_samples_heap_bufsize = 0;
 
-    // Now do the things that might throw
+    // Now do the things that might raise
     rb_protect(collector_start_protected, self, &jump_tag);
 
 out:
@@ -730,7 +498,6 @@ static VALUE collector_stop_protected(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
     rb_tracepoint_disable(cd->newobj_trace);
     rb_tracepoint_disable(cd->freeobj_trace);
-    rb_tracepoint_disable(cd->creturn_trace);
     return Qnil;
 }
 
@@ -774,14 +541,12 @@ static int collector_heap_samples_each_calc_size(st_data_t key, st_data_t val, s
     // allocate -> free -> flush, but the newobj hook handles the allocate -> free -> reuse -> flush case.
     if (RB_TYPE_P(sample->allocated_value_weak, T_NONE)) {
         sample->allocated_value_weak = Qundef;
-        internal_sample_decrement_refcount(cd, sample);
+        sample_refcount_dec(cd, sample);
         cd->heap_samples_count--;
         return ST_DELETE;
     }
-
-    if (sample->processed_in_creturn) {
-        sample->current_size = rb_obj_memsize_of(sample->allocated_value_weak);
-    }
+    MPP_ASSERT_MSG(!sample->freed_by_ruby, "freed by ruby in collector_heap_samples_each_calc_size");
+    sample->current_size = rb_obj_memsize_of(sample->allocated_value_weak);
     return ST_CONTINUE;
 }
 
@@ -796,7 +561,7 @@ static int collector_heap_samples_each_add(st_data_t key, st_data_t val, st_data
     struct mpp_sample *sample = (struct mpp_sample *)val;
     struct collector_heap_samples_each_add_args *args = (struct collector_heap_samples_each_add_args *)arg;
 
-    int r = mpp_pprof_serctx_add_sample(args->serctx, sample, MPP_SAMPLE_TYPE_HEAP, args->errbuf, args->errbuf_len);
+    int r = mpp_pprof_serctx_add_sample(args->serctx, sample, args->errbuf, args->errbuf_len);
     if (r != 0) {
         args->r = r;
         return ST_STOP;
@@ -810,10 +575,7 @@ struct collector_flush_prepresult_args {
     VALUE cProfileData;
 
     // Extra struff that needs to go onto the struct.
-    int64_t allocation_samples_count;
     int64_t heap_samples_count;
-    int64_t dropped_samples_nolock;
-    int64_t dropped_samples_allocation_bufsize;
     int64_t dropped_samples_heap_bufsize;
 };
 
@@ -830,13 +592,7 @@ static VALUE collector_flush_prepresult(VALUE vargs) {
     VALUE pprof_data = rb_str_new(args->pprofbuf, args->pprofbuf_len);
     VALUE profile_data = rb_class_new_instance(0, NULL, args->cProfileData);
     rb_funcall(profile_data, rb_intern("pprof_data="), 1, pprof_data);
-    rb_funcall(profile_data, rb_intern("allocation_samples_count="), 1, LONG2NUM(args->allocation_samples_count));
     rb_funcall(profile_data, rb_intern("heap_samples_count="), 1, LONG2NUM(args->heap_samples_count));
-    rb_funcall(profile_data, rb_intern("dropped_samples_nolock="), 1, LONG2NUM(args->dropped_samples_nolock));
-    rb_funcall(
-        profile_data, rb_intern("dropped_samples_allocation_bufsize="),
-        1, LONG2NUM(args->dropped_samples_allocation_bufsize)
-    );
     rb_funcall(
         profile_data, rb_intern("dropped_samples_heap_bufsize="),
         1, LONG2NUM(args->dropped_samples_heap_bufsize)
@@ -844,30 +600,46 @@ static VALUE collector_flush_prepresult(VALUE vargs) {
     return profile_data;
 }
 
-static VALUE collector_add_allocation_samples_to_functab(VALUE self) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-    for (struct mpp_sample *s = cd->allocation_samples; s; s = s->next_alloc) {
-        if (!s->processed_into_functab) {
-            mpp_functab_add_all_frames(cd->functab, s->bt);
-            s->processed_into_functab = 1;
+struct add_heap_samples_to_functab_args {
+    struct collector_cdata *cd;
+    struct mpp_sample **samples_copy;
+    int samples_copy_count;
+};
+
+static VALUE collector_add_heap_samples_to_functab(VALUE vargs) {
+    struct add_heap_samples_to_functab_args *args = (struct add_heap_samples_to_functab_args *)vargs;
+    for (int i = 0; i < args->samples_copy_count; i++) {
+        if (!args->samples_copy[i]->processed_into_functab) {
+//            struct mpp_functab *functab = args->cd->function_table;
+//            struct mpp_rb_backtrace *bt = args->samples_copy[i]->bt;
+//
+//            uint32_t frames_count = backtracie_bt_get_frames_count(bt->backtracie);
+//            bt->frame_extras = mpp_xmalloc(frames_count * sizeof(struct mpp_rb_backtrace_frame_extra));
+//            for (uint32_t i = 0; i < frames_count; i++) {
+//                MPP_ASSERT_MSG(!args->samples_copy[i]->freed_by_ruby, "freed by ruby in collector_add_heap_samples_to_functab (1)");
+//                VALUE frame = backtracie_bt_get_frame_value(bt->backtracie, i);
+//                MPP_ASSERT_MSG(!args->samples_copy[i]->freed_by_ruby, "freed by ruby in collector_add_heap_samples_to_functab (2)");
+//                uint64_t id = NUM2LONG(rb_obj_id(frame));
+//                MPP_ASSERT_MSG(!args->samples_copy[i]->freed_by_ruby, "freed by ruby in collector_add_heap_samples_to_functab (3)");
+//                VALUE name = backtracie_bt_get_frame_method_name(bt->backtracie, i);
+//                MPP_ASSERT_MSG(!args->samples_copy[i]->freed_by_ruby, "freed by ruby in collector_add_heap_samples_to_functab (4)");
+//                VALUE file_name = backtracie_bt_get_frame_file_name(bt->backtracie, i);
+//                MPP_ASSERT_MSG(!args->samples_copy[i]->freed_by_ruby, "freed by ruby in collector_add_heap_samples_to_functab (5)");
+//                VALUE line_number = backtracie_bt_get_frame_line_number(bt->backtracie, i);
+//                MPP_ASSERT_MSG(!args->samples_copy[i]->freed_by_ruby, "freed by ruby in collector_add_heap_samples_to_functab (6)");
+//                VALUE fn_line_number = rb_profile_frame_first_lineno(frame);
+//
+//                mpp_functab_add(functab, id, name, file_name, fn_line_number);
+//
+//                bt->frame_extras[i].function_id = id;
+//                bt->frame_extras[i].line_number = RTEST(line_number) ? NUM2LONG(line_number) : 0;
+//            }
+
+            mpp_functab_add_all_frames(args->cd->function_table, args->samples_copy[i]->bt);
+
+            args->samples_copy[i]->processed_into_functab = 1;
         }
     }
-    return Qnil;
-}
-
-static int collector_add_heap_sample_to_functab_each(st_data_t key, st_data_t val, st_data_t arg) {
-    struct collector_cdata *cd = (struct collector_cdata *) arg;
-    struct mpp_sample *s = (struct mpp_sample *) val;
-    if (!s->processed_into_functab) {
-        mpp_functab_add_all_frames(cd->functab, s->bt);
-        s->processed_into_functab = 1;
-    }
-    return ST_CONTINUE;
-}
-
-static VALUE collector_add_heap_samples_to_functab(VALUE self) {
-    struct collector_cdata *cd = collector_cdata_get(self);
-    st_foreach(cd->heap_samples, collector_add_heap_sample_to_functab_each, (st_data_t)cd);
     return Qnil;
 }
 
@@ -880,38 +652,41 @@ static VALUE collector_flush(VALUE self) {
     int jump_tag = 0;
     int r = 0;
     VALUE retval = Qundef;
-    struct mpp_sample *sample_list = NULL;
     struct collector_flush_prepresult_args prepresult_args;
     int lock_held = 0;
+    struct mpp_sample **samples_copy = NULL;
+    int samples_copy_count = 0;
 
     // Whilst under the GVL, we need to get the collector lock
     mpp_pthread_mutex_lock(&cd->lock);
     lock_held = 1;
-    cd->is_flushing = true;
 
     // Get the current size for everything in the live allocations table.
+    // TODO: this really needs to go into the for loop below, but i don't think it does
+    // any allocations so it _probably_ won't crash.
     rb_protect(collector_flush_protected_heap_sample_size, self, &jump_tag);
     if (jump_tag) goto out;
-    rb_protect(collector_add_allocation_samples_to_functab, self, &jump_tag);
-    if (jump_tag) goto out;
-    rb_protect(collector_add_heap_samples_to_functab, self, &jump_tag);
+
+    samples_copy_count = cd->heap_samples_count;
+    samples_copy = mpp_xmalloc(samples_copy_count * sizeof(struct mpp_sample *));
+    st_values(cd->heap_samples, (st_data_t *)samples_copy, samples_copy_count);
+
+    for (int i = 0; i < samples_copy_count; i++) {
+        sample_refcount_inc(samples_copy[i]);
+    }
+
+    struct add_heap_samples_to_functab_args hsargs;
+    hsargs.cd = cd;
+    hsargs.samples_copy = samples_copy;
+    hsargs.samples_copy_count = samples_copy_count;
+    rb_protect(collector_add_heap_samples_to_functab, (VALUE)&hsargs, &jump_tag);
     if (jump_tag) goto out;
 
-    sample_list = cd->allocation_samples;
-    cd->allocation_samples = NULL;
-    prepresult_args.allocation_samples_count = cd->allocation_samples_count;
+
     prepresult_args.heap_samples_count = cd->heap_samples_count;
-    cd->allocation_samples_count = 0;
-    cd->pending_size_count = 0;
-
-    prepresult_args.dropped_samples_nolock =
-        __atomic_exchange_n(&cd->dropped_samples_nolock, 0, __ATOMIC_SEQ_CST);
-    prepresult_args.dropped_samples_allocation_bufsize =
-        __atomic_exchange_n(&cd->dropped_samples_allocation_bufsize, 0, __ATOMIC_SEQ_CST);
-    prepresult_args.dropped_samples_heap_bufsize =
-        __atomic_exchange_n(&cd->dropped_samples_heap_bufsize, 0, __ATOMIC_SEQ_CST);
-
-    serctx = mpp_pprof_serctx_new(cd->string_tab, cd->functab, errbuf, sizeof(errbuf));
+    prepresult_args.dropped_samples_heap_bufsize = cd->dropped_samples_heap_bufsize;
+    cd->dropped_samples_heap_bufsize = 0;
+    serctx = mpp_pprof_serctx_new(cd->string_table, cd->function_table, errbuf, sizeof(errbuf));
     if (!serctx) {
         goto out;
     }
@@ -921,15 +696,7 @@ static VALUE collector_flush(VALUE self) {
     mpp_pthread_mutex_unlock(&cd->lock);
     lock_held = 0;
 
-    // Add the allocation samples
-    struct mpp_sample *s = sample_list;
-    while (s) {
-        r = mpp_pprof_serctx_add_sample(serctx, s, MPP_SAMPLE_TYPE_ALLOCATION, errbuf, sizeof(errbuf));
-        if (r == -1) {
-            goto out;
-        }
-        s = s->next_alloc;
-    }
+    // TODO - I think we can release the GVL at this point.
 
     // Add the heap samples
     struct collector_heap_samples_each_add_args heap_add_args;
@@ -944,6 +711,7 @@ static VALUE collector_flush(VALUE self) {
     if ( r == -1) {
         goto out;
     }
+
     // Annoyingly, since rb_str_new could (in theory) throw, we have to rb_protect the whole construction
     // of our return value to ensure we don't leak serctx.
     prepresult_args.pprofbuf = buf_out;
@@ -954,9 +722,10 @@ static VALUE collector_flush(VALUE self) {
     // Do cleanup here now.
 out:
     if (serctx) mpp_pprof_serctx_destroy(serctx);
+    for (int i = 0; i < samples_copy_count; i++) {
+        sample_refcount_dec(cd, samples_copy[i]);
+    }
     if (lock_held) mpp_pthread_mutex_unlock(&cd->lock);
-    if (sample_list) internal_sample_decrement_refcount(cd, sample_list);
-    cd->is_flushing = false;
 
     // Now return-or-raise back to ruby.
     if (jump_tag) {
@@ -1047,12 +816,8 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "initialize", collector_initialize, -1);
     rb_define_method(cCollector, "sample_rate", collector_get_sample_rate, 0);
     rb_define_method(cCollector, "sample_rate=", collector_set_sample_rate, 1);
-    rb_define_method(cCollector, "max_allocation_samples", collector_get_max_allocation_samples, 0);
-    rb_define_method(cCollector, "max_allocation_samples=", collector_set_max_allocation_samples, 1);
     rb_define_method(cCollector, "max_heap_samples", collector_get_max_heap_samples, 0);
     rb_define_method(cCollector, "max_heap_samples=", collector_set_max_heap_samples, 1);
-    rb_define_method(cCollector, "allocation_retain_rate", collector_get_allocation_retain_rate, 0);
-    rb_define_method(cCollector, "allocation_retain_rate=", collector_set_allocation_retain_rate, 1);
     rb_define_method(cCollector, "running?", collector_is_running, 0);
     rb_define_method(cCollector, "start!", collector_start, 0);
     rb_define_method(cCollector, "stop!", collector_stop, 0);

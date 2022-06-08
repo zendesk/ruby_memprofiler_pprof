@@ -231,22 +231,18 @@ struct mpp_functab_func *mpp_functab_lookup_frame(struct mpp_functab *functab, u
 struct mpp_sample {
     // The backtrace for this sample
     struct mpp_rb_backtrace *bt;
-    // Sample has a refcount - because it's used both in the heap profiling and in the allocation profiling.
-    int64_t refcount;
-    // How big this allocation was.
-    size_t allocation_size;
     // How big this object _currently_ is
     size_t current_size;
     // Weak reference to what was allocated. Validate that it's alive by consulting the live object table first.
     VALUE allocated_value_weak;
-    // Whether or not this sample has been processed into the function table (i.e. we've gone and figured out
-    // names for all of its methods).
+    // Whether or not this sample's backtrace has been processed into the function table (i.e. we've gone and
+    // figured out names for all of its methods).
     bool processed_into_functab;
-    // Whether or not this sample has been processed in a creturn hook yet (i.e. it's ready to do things like
-    // calculate size)
-    bool processed_in_creturn;
-    // Next element in the allocation profiling sample list. DO NOT use this in the heap profiling table.
-    struct mpp_sample *next_alloc;
+    bool freed_by_ruby;
+    // Reference counting scheme for managing the sample lifecycle. Usually the refcount is one, but pops
+    // up to two if a sample is in the process of being flushed (so that it doesn't immediately get freed
+    // if a GC should run in the meanwhile).
+    int refcount;
 };
 
 // ======== PROTO SERIALIZATION ROUTINES ========
@@ -257,10 +253,10 @@ struct mpp_pprof_serctx {
     upb_alloc allocator;
     upb_Arena *arena;
     // Location table used for looking up fucntion IDs to strings.
-    struct mpp_functab *functab;
+    struct mpp_functab *function_table;
     // String intern index; recall that holding this object does _not_ require that we have exclusive
     // use of the underlying string intern table, so it's safe for us to use this in a separate thread.
-    struct mpp_strtab_index *strindex;
+    struct mpp_strtab_index *string_intern_index;
     // Map of function ID -> function protobuf
     st_table *function_pbs;
     // Map of (function ID, line number) -> location protobufs
@@ -273,23 +269,18 @@ struct mpp_pprof_serctx {
     // We need to keep interned copies of some strings that will wind up in the protobuf output.
     // This is so that we can put constant values like "allocations" and "count" into our pprof output
     // (the pprof format requires these strings to be in the string table along with the rest of them)
-    const char *internstr_allocations;
     const char *internstr_count;
-    const char *internstr_allocation_size;
     const char *internstr_bytes;
     const char *internstr_retained_objects;
     const char *internstr_retained_size;
 };
-
-#define MPP_SAMPLE_TYPE_ALLOCATION 1
-#define MPP_SAMPLE_TYPE_HEAP 2
 
 struct mpp_pprof_serctx *mpp_pprof_serctx_new(
         struct mpp_strtab *strtab, struct mpp_functab *functab, char *errbuf, size_t errbuflen
 );
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
 int mpp_pprof_serctx_add_sample(
-    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, int sample_type, char *errbuf, size_t errbuflen
+    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen
 );
 int mpp_pprof_serctx_serialize(
     struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen
