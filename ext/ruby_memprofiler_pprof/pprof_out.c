@@ -110,11 +110,11 @@ struct mpp_pprof_serctx_map_add_ctx {
     int is_error;
     char *errbuf;
     size_t errbuflen;
-    struct mpp_functab_func *func;
+    struct mpp_functab_entry *func;
 
     // for add_location
-    uint64_t line_number;
-    uint64_t location_id_out;
+    unsigned long line_number;
+    unsigned long location_id_out;
 };
 
 static int mpp_pprof_serctx_add_function(st_data_t *key, st_data_t *value, st_data_t data, int existing) {
@@ -167,7 +167,7 @@ static int mpp_pprof_serctx_add_location(st_data_t *key, st_data_t *value, st_da
     perftools_profiles_Location_set_id(loc_proto, thunkctx->ctx->loc_counter++);
     perftools_profiles_Line *line_proto = perftools_profiles_Location_add_line(loc_proto, thunkctx->ctx->arena);
     perftools_profiles_Line_set_function_id(line_proto, thunkctx->func->id);
-    perftools_profiles_Line_set_line(line_proto, thunkctx->line_number);
+    perftools_profiles_Line_set_line(line_proto, (int64_t)thunkctx->line_number);
 
     thunkctx->location_id_out = perftools_profiles_Location_id(loc_proto);
     *value = (st_data_t)loc_proto;
@@ -175,14 +175,9 @@ static int mpp_pprof_serctx_add_location(st_data_t *key, st_data_t *value, st_da
 }
 
 int mpp_pprof_serctx_add_sample(
-    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen
+    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, size_t allocated_size, char *errbuf, size_t errbuflen
 ) {
-    // Skip adding to this profile if frame extras haven't been collected - it'll wind up
-    // in the next profile.
-    if (!sample->bt->frame_extras) {
-        return 0;
-    }
-    uint32_t frames_count = backtracie_bt_get_frames_count(sample->bt->backtracie);
+    uint32_t frames_count = sample->processed_backtrace->num_frames;
     perftools_profiles_Sample *sample_proto = perftools_profiles_Profile_add_sample(ctx->profile_proto, ctx->arena);
     uint64_t *location_ids =
         perftools_profiles_Sample_resize_location_id(sample_proto, frames_count, ctx->arena);
@@ -195,9 +190,9 @@ int mpp_pprof_serctx_add_sample(
         thunkctx.errbuf = errbuf;
         thunkctx.errbuflen = errbuflen;
         thunkctx.is_error = 0;
-        uint64_t function_id = sample->bt->frame_extras[i].function_id;
-        uint64_t line_number = sample->bt->frame_extras[i].line_number;
-        thunkctx.func = mpp_functab_lookup_frame(ctx->function_table, function_id);
+        unsigned long function_id = sample->processed_backtrace->frames[i].function_id;
+        unsigned long line_number = sample->processed_backtrace->frames[i].line_number;
+        thunkctx.func = mpp_functab_lookup(ctx->function_table, function_id);
         MPP_ASSERT_MSG(thunkctx.func, "missing function ID in function_table!");
         thunkctx.location_id_out = 0;
         thunkctx.line_number = line_number;
@@ -217,7 +212,7 @@ int mpp_pprof_serctx_add_sample(
 
     // Values are (retained_count, retained_size).
     perftools_profiles_Sample_add_value(sample_proto, 1, ctx->arena);
-    perftools_profiles_Sample_add_value(sample_proto, (int64_t)sample->current_size, ctx->arena);
+    perftools_profiles_Sample_add_value(sample_proto, (int64_t)allocated_size, ctx->arena);
     return 0;
 }
 

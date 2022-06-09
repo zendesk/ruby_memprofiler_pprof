@@ -2,3 +2,7 @@
 *.bundle
 tmp/
 *.gem
+ext/ruby_memprofiler_pprof/Makefile
+mkmf.log
+*.o
+

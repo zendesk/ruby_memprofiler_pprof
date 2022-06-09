@@ -40,7 +40,6 @@ describe MemprofilerPprof::FileFlusher do
     end
     raise "File #{file} did not get created"
   end
-  question: have you ever tried to combine freeobj tracepoints with GC.compact? I have a test which runs compaction a bunch in the profiler, and it’s failing sporadically with a segfault here:
 
 
     it 'writes profiles to the directory' do
