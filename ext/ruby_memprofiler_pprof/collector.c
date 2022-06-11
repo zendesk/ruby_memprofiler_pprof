@@ -12,11 +12,6 @@
 #include "ruby_memprofiler_pprof.h"
 
 struct collector_cdata {
-    // Internal, cross-ractor lock for this data; this gem doesn't work with ractors yet,
-    // but this'll be needed when it does.
-    // The mutex is recursive, so it's safe to attempt to re-entrantly acquire it
-    pthread_mutex_t lock;
-
     // Global variables we need to keep a hold of
     VALUE cCollector;
     VALUE cProfileData;
@@ -60,21 +55,9 @@ struct collector_cdata {
     struct mpp_functab *function_table;
 };
 
-// We need a global list of all collectors, so that, in our atfork handler, we can correctly lock/unlock
-// all of their mutexes and guarantee correctness across forks.
-static st_table *global_collectors;
-static pthread_mutex_t global_collectors_lock;
-
 static struct collector_cdata *collector_cdata_get(VALUE self);
 static VALUE collector_alloc(VALUE klass);
 static VALUE collector_initialize(int argc, VALUE *argv, VALUE self);
-struct initialize_protected_args {
-    int argc;
-    VALUE *argv;
-    VALUE self;
-    struct collector_cdata *cd;
-};
-static VALUE collector_initialize_protected(VALUE vargs);
 static void collector_cdata_gc_mark(void *ptr);
 static int collector_gc_mark_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
 static void collector_gc_free(void *ptr);
@@ -91,9 +74,7 @@ static VALUE collector_tphook_newobj_protected(VALUE ctxarg);
 static void collector_tphook_newobj(VALUE tpval, void *data);
 static void collector_tphook_freeobj(VALUE tpval, void *data);
 static VALUE collector_start(VALUE self);
-static VALUE collector_start_protected(VALUE self);
 static VALUE collector_stop(VALUE self);
-static VALUE collector_stop_protected(VALUE self);
 static VALUE collector_is_running(VALUE self);
 static VALUE collector_flush(VALUE self);
 static VALUE flush_process_samples(VALUE ctxarg);
@@ -118,12 +99,6 @@ static VALUE collector_get_sample_rate(VALUE self);
 static VALUE collector_set_sample_rate(VALUE self, VALUE newval);
 static VALUE collector_get_max_heap_samples(VALUE self);
 static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval);
-static void mpp_collector_atfork_prepare();
-static void mpp_collector_atfork_release_parent();
-static void mpp_collector_atfork_release_child();
-static int mpp_collector_atfork_lock_el(st_data_t key, st_data_t value, st_data_t arg);
-static int mpp_collector_atfork_unlock_el(st_data_t key, st_data_t value, st_data_t arg);
-static int mpp_collector_atfork_replace_el(st_data_t key, st_data_t value, st_data_t arg);
 
 static const rb_data_type_t collector_cdata_type = {
     "collector_cdata",
@@ -155,10 +130,6 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "flush", collector_flush, 0);
     rb_define_method(cCollector, "profile", collector_profile, 0);
     rb_define_method(cCollector, "live_heap_samples_count", collector_live_heap_samples_count, 0);
-
-    global_collectors = st_init_numtable();
-    mpp_pthread_mutex_init(&global_collectors_lock, NULL);
-    mpp_pthread_atfork(mpp_collector_atfork_prepare, mpp_collector_atfork_release_parent, mpp_collector_atfork_release_child);
 }
 
 static struct collector_cdata *collector_cdata_get(VALUE self) {
@@ -184,43 +155,11 @@ static VALUE collector_alloc(VALUE klass) {
     cd->dropped_samples_heap_bufsize = 0;
     cd->string_table = NULL;
     cd->function_table = NULL;
-
-    // Initialize the mutex.
-    // It really does need to be recursive - if we call a rb_* function while holding
-    // the lock, that could trigger the GC to run and call our freeobj tracepoint,
-    // which _also_ needs the lock.
-    pthread_mutexattr_t mutex_attr;
-    mpp_pthread_mutexattr_init(&mutex_attr);
-    mpp_pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
-    mpp_pthread_mutex_init(&cd->lock, &mutex_attr);
-    mpp_pthread_mutexattr_destroy(&mutex_attr);
-
-    // Add us to the global list of collectors, to handle pthread_atfork.
-    mpp_pthread_mutex_lock(&global_collectors_lock);
-    st_insert(global_collectors, (st_data_t)cd, (st_data_t)cd);
-    mpp_pthread_mutex_unlock(&global_collectors_lock);
     return v;
 }
 
 static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
-    // Need to do this rb_protect dance to ensure that all access to collector_cdata is through the mutex.
-    struct initialize_protected_args args;
-    args.argc = argc;
-    args.argv = argv;
-    args.self = self;
-    args.cd = collector_cdata_get(self);
-
-    mpp_pthread_mutex_lock(&args.cd->lock);
-    int jump_tag = 0;
-    VALUE r = rb_protect(collector_initialize_protected, (VALUE)&args, &jump_tag);
-    mpp_pthread_mutex_unlock(&args.cd->lock);
-    if (jump_tag) rb_jump_tag(jump_tag);
-    return r;
-}
-
-static VALUE collector_initialize_protected(VALUE vargs) {
-    struct initialize_protected_args *args = (struct initialize_protected_args *)vargs;
-    struct collector_cdata *cd = args->cd;
+   struct collector_cdata *cd = collector_cdata_get(self);
 
     // Save constants
     cd->mMemprofilerPprof = rb_const_get(rb_cObject, rb_intern("MemprofilerPprof"));
@@ -229,7 +168,7 @@ static VALUE collector_initialize_protected(VALUE vargs) {
 
     // Argument parsing
     VALUE kwargs_hash = Qnil;
-    rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, args->argc, args->argv, "00:", &kwargs_hash);
+    rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, argc, argv, "00:", &kwargs_hash);
     VALUE kwarg_values[2];
     ID kwarg_ids[2];
     kwarg_ids[0] = rb_intern("sample_rate");
@@ -240,8 +179,8 @@ static VALUE collector_initialize_protected(VALUE vargs) {
     if (kwarg_values[0] == Qundef) kwarg_values[0] = DBL2NUM(0.01);
     if (kwarg_values[1] == Qundef) kwarg_values[1] = LONG2NUM(50000);
 
-    rb_funcall(args->self, rb_intern("sample_rate="), 1, kwarg_values[0]);
-    rb_funcall(args->self, rb_intern("max_heap_samples="), 1, kwarg_values[1]);
+    rb_funcall(self, rb_intern("sample_rate="), 1, kwarg_values[0]);
+    rb_funcall(self, rb_intern("max_heap_samples="), 1, kwarg_values[1]);
 
     cd->string_table = mpp_strtab_new();
     cd->function_table = mpp_functab_new(cd->string_table);
@@ -287,9 +226,6 @@ static void collector_gc_free(void *ptr) {
         }
     }
 
-    // Needed in case there are any in-flight tracepoints we just disabled above.
-    mpp_pthread_mutex_lock(&cd->lock);
-
     collector_gc_free_heap_samples(cd);
     if (cd->function_table) {
         mpp_functab_destroy(cd->function_table);
@@ -297,15 +233,6 @@ static void collector_gc_free(void *ptr) {
     if (cd->string_table) {
         mpp_strtab_destroy(cd->string_table);
     }
-
-    // Remove from global collectors list.
-    mpp_pthread_mutex_lock(&global_collectors_lock);
-    st_data_t cd_key = (st_data_t)cd;
-    st_delete(global_collectors, &cd_key, NULL);
-    mpp_pthread_mutex_unlock(&global_collectors_lock);
-
-    mpp_pthread_mutex_unlock(&cd->lock);
-    mpp_pthread_mutex_destroy(&cd->lock);
 
     ruby_xfree(ptr);
 }
@@ -409,8 +336,6 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     VALUE original_errinfo = Qundef;
     int jump_tag = 0;
 
-    mpp_pthread_mutex_lock(&cd->lock);
-
 #ifdef MPP_PARANOID_MAY_MISS_FREES
     // For every new object that is created, we _MUST_ check if there is already another VALUE with the same,
     // well, value, in our heap profiling table of live objects. This is because Ruby reserves the right to
@@ -432,8 +357,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 
     // This looks super redundant, _BUT_ there is a narrow possibility that some of the code we invoke
     // inside the rb_protect actually does RVALUE allocations itself, and so recursively runs this hook
-    // (which will work, because the &cd->lock mutex is recursive). So, we need to actually check
-    // our buffer sizes _again_.
+    // (which will work). So, we need to actually check our buffer sizes _again_.
     if (cd->heap_samples_count >= cd->max_heap_samples) {
         cd->dropped_samples_heap_bufsize++;
         goto out;
@@ -462,8 +386,6 @@ out:
     if (sample) mpp_sample_refcount_dec(sample, cd->function_table);
     // If there was an exception, ignore it and restore the original errinfo.
     if (jump_tag && original_errinfo != Qundef) rb_set_errinfo(original_errinfo);
-
-    mpp_pthread_mutex_unlock(&cd->lock);
 }
 
 
@@ -477,24 +399,16 @@ static VALUE collector_tphook_newobj_protected(VALUE ctxarg) {
 static void collector_tphook_freeobj(VALUE tpval, void *data) {
     struct collector_cdata *cd = (struct collector_cdata *)data;
 
-    // We unfortunately do really need the mutex here, because if we don't handle this, we might
-    // leave an allocation kicking around in live_objects that has been freed.
-    mpp_pthread_mutex_lock(&cd->lock);
-
     // Definitely do _NOT_ try and run any Ruby code in here. Any allocation will crash
     // the process.
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
     VALUE freed_obj = rb_tracearg_object(tparg);
     collector_mark_sample_value_as_freed(cd, freed_obj);
-
-    mpp_pthread_mutex_unlock(&cd->lock);
 }
 
 static VALUE collector_start(VALUE self) {
-    int jump_tag = 0;
     struct collector_cdata *cd = collector_cdata_get(self);
-    mpp_pthread_mutex_lock(&cd->lock);
-    if (cd->is_tracing) goto out;
+    if (cd->is_tracing) return Qnil;
 
     // Don't needlessly double-initialize everything
     if (cd->heap_samples_count > 0) {
@@ -502,22 +416,7 @@ static VALUE collector_start(VALUE self) {
         cd->heap_samples = st_init_numtable();
         cd->heap_samples_count = 0;
     }
-    cd->is_tracing = true;
     cd->dropped_samples_heap_bufsize = 0;
-
-    // Now do the things that might raise
-    rb_protect(collector_start_protected, self, &jump_tag);
-
-out:
-    mpp_pthread_mutex_unlock(&cd->lock);
-    if (jump_tag) {
-        rb_jump_tag(jump_tag);
-    }
-    return Qnil;
-}
-
-static VALUE collector_start_protected(VALUE self) {
-    struct collector_cdata *cd = collector_cdata_get(self);
 
     if (cd->newobj_trace == Qnil) {
         cd->newobj_trace = rb_tracepoint_new(
@@ -532,41 +431,25 @@ static VALUE collector_start_protected(VALUE self) {
 
     rb_tracepoint_enable(cd->newobj_trace);
     rb_tracepoint_enable(cd->freeobj_trace);
+
+    cd->is_tracing = true;
     return Qnil;
 }
 
 static VALUE collector_stop(VALUE self) {
-    int jump_tag = 0;
     struct collector_cdata *cd = collector_cdata_get(self);
-    mpp_pthread_mutex_lock(&cd->lock);
-    if (!cd->is_tracing) goto out;
-
-    rb_protect(collector_stop_protected, self, &jump_tag);
-    if (jump_tag) goto out;
-
-    cd->is_tracing = false;
-    // Don't clear any of our buffers - it's OK to access the profiling info after calling stop!
-out:
-    mpp_pthread_mutex_unlock(&cd->lock);
-    if (jump_tag) {
-        rb_jump_tag(jump_tag);
-    }
-    return Qnil;
-}
-
-static VALUE collector_stop_protected(VALUE self) {
-    struct collector_cdata *cd = collector_cdata_get(self);
+    if (!cd->is_tracing) return Qnil;
     rb_tracepoint_disable(cd->newobj_trace);
     rb_tracepoint_disable(cd->freeobj_trace);
+    cd->is_tracing = false;
+    // Don't clear any of our buffers - it's OK to access the profiling info after calling stop!
     return Qnil;
 }
+
 
 static VALUE collector_is_running(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
-    mpp_pthread_mutex_lock(&cd->lock);
-    bool running = cd->is_tracing;
-    mpp_pthread_mutex_unlock(&cd->lock);
-    return running ? Qtrue : Qfalse;
+    return cd->is_tracing ? Qtrue : Qfalse;
 }
 
 static VALUE collector_flush(VALUE self) {
@@ -581,8 +464,6 @@ static VALUE collector_flush(VALUE self) {
     VALUE retval = Qundef;
     struct mpp_pprof_serctx *serctx = NULL;
     int r = 0;
-
-    mpp_pthread_mutex_lock(&cd->lock);
 
     if (cd->heap_samples_flush_copy) {
         ruby_snprintf(errbuf, sizeof(errbuf), "concurrent calls to #flush are not valid");
@@ -673,9 +554,6 @@ static VALUE collector_flush(VALUE self) {
         mpp_free(heap_samples_sizes);
     }
 
-
-    mpp_pthread_mutex_unlock(&cd->lock);
-
     // Now return-or-raise back to ruby.
     if (jump_tag) {
         rb_jump_tag(jump_tag);
@@ -685,8 +563,6 @@ static VALUE collector_flush(VALUE self) {
         rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof failed serializing pprof protobuf: %s", errbuf);
     }
     return retval;
-
-    RB_GC_GUARD(self);
 }
 
 static VALUE flush_process_samples(VALUE ctxarg) {
@@ -730,94 +606,28 @@ static VALUE collector_profile(VALUE self) {
 
 static VALUE collector_live_heap_samples_count(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
-
-    mpp_pthread_mutex_lock(&cd->lock);
-    size_t counter = cd->heap_samples_count;
-    mpp_pthread_mutex_unlock(&cd->lock);
-    return SIZET2NUM(counter);
+    return SIZET2NUM(cd->heap_samples_count);
 }
 
 static VALUE collector_get_sample_rate(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
-    mpp_pthread_mutex_lock(&cd->lock);
-    uint32_t u32_sample_rate = cd->u32_sample_rate;
-    mpp_pthread_mutex_unlock(&cd->lock);
-    return DBL2NUM(((double)u32_sample_rate)/UINT32_MAX);
+    return DBL2NUM(((double)cd->u32_sample_rate)/UINT32_MAX);
 }
 
 static VALUE collector_set_sample_rate(VALUE self, VALUE newval) {
     struct collector_cdata *cd = collector_cdata_get(self);
-    double dbl_sample_rate = NUM2DBL(newval);
     // Convert the double sample rate (between 0 and 1) to a value between 0 and UINT32_MAX
-    uint32_t new_sample_rate_uint = UINT32_MAX * dbl_sample_rate;
-
-    mpp_pthread_mutex_lock(&cd->lock);
-    cd->u32_sample_rate = new_sample_rate_uint;
-    mpp_pthread_mutex_unlock(&cd->lock);
-
+    cd->u32_sample_rate = UINT32_MAX * NUM2DBL(newval);
     return newval;
 }
 
 static VALUE collector_get_max_heap_samples(VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
-    mpp_pthread_mutex_lock(&cd->lock);
-    size_t v = cd->max_heap_samples;
-    mpp_pthread_mutex_unlock(&cd->lock);
-    return SIZET2NUM(v);
+    return SIZET2NUM(cd->max_heap_samples);
 }
 
 static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval) {
     struct collector_cdata *cd = collector_cdata_get(self);
-    int64_t v = NUM2LONG(newval);
-    mpp_pthread_mutex_lock(&cd->lock);
-    cd->max_heap_samples = v;
-    mpp_pthread_mutex_unlock(&cd->lock);
+    cd->max_heap_samples = NUM2SIZET(newval);
     return newval;
-}
-
-static void mpp_collector_atfork_prepare() {
-    mpp_pthread_mutex_lock(&global_collectors_lock);
-    st_foreach(global_collectors, mpp_collector_atfork_lock_el, 0);
-}
-
-static void mpp_collector_atfork_release_parent() {
-    st_foreach(global_collectors, mpp_collector_atfork_unlock_el, 0);
-    mpp_pthread_mutex_unlock(&global_collectors_lock);
-}
-
-static void mpp_collector_atfork_release_child() {
-    st_foreach(global_collectors, mpp_collector_atfork_replace_el, 0);
-    mpp_pthread_mutex_unlock(&global_collectors_lock);
-}
-
-
-static int mpp_collector_atfork_lock_el(st_data_t key, st_data_t value, st_data_t arg) {
-    struct collector_cdata *cd = (struct collector_cdata *)key;
-    mpp_pthread_mutex_lock(&cd->lock);
-    return ST_CONTINUE;
-}
-
-static int mpp_collector_atfork_unlock_el(st_data_t key, st_data_t value, st_data_t arg) {
-    struct collector_cdata *cd = (struct collector_cdata *)key;
-    mpp_pthread_mutex_unlock(&cd->lock);
-    return ST_CONTINUE;
-}
-
-static int mpp_collector_atfork_replace_el(st_data_t key, st_data_t value, st_data_t arg) {
-    struct collector_cdata *cd = (struct collector_cdata *)key;
-
-    // In the parent process, we simply release the mutexes, but in the child process, we have
-    // to _RECREATE_ them. This is because they're recursive mutexes, and must hold some kind of
-    // thread ID in them somehow; unlocking them post-fork simply doesn't work it seems.
-    // It's safe to re-create the mutex at this point, because no other thread can possibly be
-    // holding it since we took it pre-fork
-    mpp_pthread_mutex_destroy(&cd->lock);
-    pthread_mutexattr_t mutex_attr;
-    mpp_pthread_mutexattr_init(&mutex_attr);
-    mpp_pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
-    memset(&cd->lock, 0, sizeof(cd->lock));
-    mpp_pthread_mutex_init(&cd->lock, &mutex_attr);
-    mpp_pthread_mutexattr_destroy(&mutex_attr);
-
-    return ST_CONTINUE;
 }
