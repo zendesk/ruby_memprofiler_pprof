@@ -28,7 +28,7 @@ class TestApp < Sinatra::Base
 end
 
 collector = MemprofilerPprof::Collector.new
-collector.sample_rate = 0.5
+collector.sample_rate = 1.0
 
 threads = (0..5).map do
   Thread.new do
