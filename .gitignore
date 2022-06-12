@@ -5,4 +5,6 @@ tmp/
 ext/ruby_memprofiler_pprof/Makefile
 mkmf.log
 *.o
+.vscode/
+.gdb_history
 

@@ -70,7 +70,6 @@ static void collector_cdata_gc_compact(void *ptr);
 static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
 #endif
 static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VALUE freed_obj);
-static VALUE collector_tphook_newobj_protected(VALUE ctxarg);
 static void collector_tphook_newobj(VALUE tpval, void *data);
 static void collector_tphook_freeobj(VALUE tpval, void *data);
 static VALUE collector_start(VALUE self);
@@ -248,8 +247,7 @@ static void collector_gc_free_heap_samples(struct collector_cdata *cd) {
 static int collector_gc_free_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
     struct mpp_sample *sample = (struct mpp_sample *)value;
     struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
-    uint8_t new_refcount = mpp_sample_refcount_dec(sample, cd->function_table);
-    MPP_ASSERT_MSG(new_refcount == 0, "sample refcount did not go to zero during GC freeing");
+    mpp_sample_refcount_dec(sample, cd->function_table);
     return ST_CONTINUE;
 }
 
@@ -291,7 +289,7 @@ static void collector_cdata_gc_compact(void *ptr) {
     // If we're in the middle of a call to #flush and have a copy, move those too.
     if (cd->heap_samples_flush_copy) {
         for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
-            mpp_sample_gc_move(cd->heap_samples_flush_copy[i]);
+            mpp_sample_gc_compact(cd->heap_samples_flush_copy[i]);
         }
     }
 }
@@ -301,7 +299,7 @@ static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st
     struct mpp_sample *sample = (struct mpp_sample *)value;
 
     // Handle compaction of the heap samples themselves
-    mpp_sample_gc_move(sample);
+    mpp_sample_gc_compact(sample);
 
     // Handle compaction of our weak reference to the heap sample.
     if (rb_gc_location(sample->allocated_value_weak) == sample->allocated_value_weak) {
@@ -330,12 +328,6 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
     VALUE newobj = rb_tracearg_object(tparg);
 
-    // These need to be initialized up here so that they're properly zero-initialized if
-    // we goto out before they're otherwise filled.
-    struct mpp_sample *sample = NULL;
-    VALUE original_errinfo = Qundef;
-    int jump_tag = 0;
-
 #ifdef MPP_PARANOID_MAY_MISS_FREES
     // For every new object that is created, we _MUST_ check if there is already another VALUE with the same,
     // well, value, in our heap profiling table of live objects. This is because Ruby reserves the right to
@@ -347,53 +339,27 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 
     // Skip the rest of this method if we're not sampling.
     if (mpp_rand() > cd->u32_sample_rate) {
-       goto out;
+       return;
     }
     // Make sure there's enough space in our buffer
     if (cd->heap_samples_count >= cd->max_heap_samples) {
         cd->dropped_samples_heap_bufsize++;
-        goto out;
-    }
-
-    // This looks super redundant, _BUT_ there is a narrow possibility that some of the code we invoke
-    // inside the rb_protect actually does RVALUE allocations itself, and so recursively runs this hook
-    // (which will work). So, we need to actually check our buffer sizes _again_.
-    if (cd->heap_samples_count >= cd->max_heap_samples) {
-        cd->dropped_samples_heap_bufsize++;
-        goto out;
+        return;
     }
 
     // OK, now it's time to add to our sample buffer.
-    sample = mpp_sample_new();
+    struct mpp_sample *sample = mpp_sample_new();
     sample->allocated_value_weak = newobj;
 
-    // Run our backtrace collection in here under rb_protect now so that it cannot longjmp out
-    original_errinfo = rb_errinfo();
-    rb_protect(collector_tphook_newobj_protected, (VALUE)sample, &jump_tag);
-    if (jump_tag) goto out;
-
+    size_t required_bufsize = 0;
+    backtracie_bt_capture(NULL, &required_bufsize);
+    void *backtracie_mem = mpp_xmalloc(required_bufsize);
+    sample->raw_backtrace = backtracie_bt_capture(backtracie_mem, &required_bufsize);
 
     // insert into live sample map
     int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);
     MPP_ASSERT_MSG(alread_existed == 0, "st_insert did an update in the newobj hook");
     cd->heap_samples_count++;
-
-    // Clear sample so it doesn't get free'd below.
-    sample = NULL;
-
-out:
-    // If this wasn't cleared, we need to free it.
-    if (sample) mpp_sample_refcount_dec(sample, cd->function_table);
-    // If there was an exception, ignore it and restore the original errinfo.
-    if (jump_tag && original_errinfo != Qundef) rb_set_errinfo(original_errinfo);
-}
-
-
-// Collects all the parts of collector_tphook_newobj that could throw.
-static VALUE collector_tphook_newobj_protected(VALUE ctxarg) {
-    struct mpp_sample *sample = (struct mpp_sample *)ctxarg;
-    sample->raw_backtrace = backtracie_bt_capture();
-    return Qnil;
 }
 
 static void collector_tphook_freeobj(VALUE tpval, void *data) {

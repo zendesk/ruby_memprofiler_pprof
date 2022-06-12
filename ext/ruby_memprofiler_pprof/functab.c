@@ -3,7 +3,7 @@
 
 static int functab_each_destroy(st_data_t key, st_data_t value, st_data_t ctxarg);
 static int functab_each_mark(st_data_t key, st_data_t value, st_data_t ctxarg);
-static int functab_each_move(st_data_t key, st_data_t value, st_data_t ctxarg);
+static int functab_each_compact(st_data_t key, st_data_t value, st_data_t ctxarg);
 struct functab_update_add_ctx {
     struct mpp_functab *functab;
     unsigned long id;
@@ -41,8 +41,8 @@ void mpp_functab_gc_mark(struct mpp_functab *functab) {
 
 #ifdef HAVE_RB_GC_MARK_MOVABLE
 // Move any owned Ruby VALUEs
-void mpp_functab_gc_move(struct mpp_functab *functab) {
-    st_foreach(functab->function_map, functab_each_move, (st_data_t)functab);
+void mpp_functab_gc_compact(struct mpp_functab *functab) {
+    st_foreach(functab->function_map, functab_each_compact, (st_data_t)functab);
 }
 #endif
 
@@ -101,7 +101,7 @@ static int functab_each_mark(st_data_t key, st_data_t value, st_data_t ctxarg) {
     return ST_CONTINUE;
 }
 
-static int functab_each_move(st_data_t key, st_data_t value, st_data_t ctxarg) {
+static int functab_each_compact(st_data_t key, st_data_t value, st_data_t ctxarg) {
     struct mpp_functab_entry *entry = (struct mpp_functab_entry *)value;
     entry->cme_or_iseq = rb_gc_location(entry->cme_or_iseq);
     return ST_CONTINUE;

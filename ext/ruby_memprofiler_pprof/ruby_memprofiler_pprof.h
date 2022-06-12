@@ -244,7 +244,7 @@ void mpp_functab_destroy(struct mpp_functab *functab);
 void mpp_functab_gc_mark(struct mpp_functab *functab);
 #ifdef HAVE_RB_GC_MARK_MOVABLE
 // Move any owned Ruby VALUEs
-void mpp_functab_gc_move(struct mpp_functab *functab);
+void mpp_functab_gc_compact(struct mpp_functab *functab);
 #endif
 // Total size of the table, for accounting purposes. Will not include the size of
 // any interned strings.
@@ -314,7 +314,7 @@ struct mpp_sample *mpp_sample_new();
 void mpp_sample_gc_mark(struct mpp_sample *sample);
 #ifdef HAVE_RB_GC_MARK_MOVABLE
 // Move any contained Ruby VALUEs
-void mpp_sample_gc_move(struct mpp_sample *sample);
+void mpp_sample_gc_compact(struct mpp_sample *sample);
 #endif
 // Total size of all things owned by the sample, for accounting purposes
 size_t mpp_sample_memsize(struct mpp_sample *sample);
