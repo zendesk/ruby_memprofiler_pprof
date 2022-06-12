@@ -20,9 +20,6 @@
 #include <method.h>
 #include <backtracie.h>
 
-// ======== FEATURES ========
-#define MPP_PARANOID_MAY_MISS_FREES
-
 // ======== COMPAT DECLARATIONS ========
 
 // For handling differences in ruby versions

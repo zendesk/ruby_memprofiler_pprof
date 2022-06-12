@@ -328,12 +328,14 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
     VALUE newobj = rb_tracearg_object(tparg);
 
-#ifdef MPP_PARANOID_MAY_MISS_FREES
-    // For every new object that is created, we _MUST_ check if there is already another VALUE with the same,
-    // well, value, in our heap profiling table of live objects. This is because Ruby reserves the right to
-    // simply free some kinds of internal objects (such as T_IMEMOs) by simply setting the flags value on it
-    // to zero, without invoking the GC and without calling any kind of hook. So, we need to detect when such
-    // an object is freed and then the RVALUE is re-used for a new object to track it appropriately.
+#ifdef HAVE_WORKING_RB_GC_FORCE_RECYCLE
+    // Normally, any object allocated that calls the newobj hook will be freed during GC,
+    // and the freeobj tracepoint will then be called. Thus, any object added to the heap sample
+    // map will be removed before a different object in the same slot is creeated.
+    // Unfortunately, the one place that _isn't_ true is if an object is freed manually with
+    // rb_gc_force_recycle(). This is deprecated in Ruby >= 3.1, but before that the only time
+    // we find out that such an object is freed is when a new object is created in the same
+    // slot. Handle that by marking an existing object in the sample map as "free'd".
     collector_mark_sample_value_as_freed(cd, newobj);
 #endif
 
