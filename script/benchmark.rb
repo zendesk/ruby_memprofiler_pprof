@@ -77,7 +77,7 @@ def benchmark_machine(sc, leak_pit)
 end
 
 
-Benchmark.bm(50) do |b|
+Benchmark.bm(36) do |b|
   leak_pit = []
   sc = benchmark_scenario.dup
   GC.start
@@ -92,29 +92,31 @@ Benchmark.bm(50) do |b|
     benchmark_machine(sc, leak_pit)
   end
 
-  leak_pit = []
-  sc = benchmark_scenario.dup
-  GC.start
-  $collector = MemprofilerPprof::Collector.new
-  $collector.sample_rate = 0.1
-  b.report("with profiling (10%, backtracie)") do
-    $collector.start!
+  [1, 10, 100].each do |perc|
+    leak_pit = []
+    sc = benchmark_scenario.dup
+    GC.start
+    $collector = MemprofilerPprof::Collector.new
+    $collector.sample_rate = 0.01 * perc
+    b.report("with profiling (#{perc}%, no flush)") do
+      $collector.start!
 
-    benchmark_machine(sc, leak_pit)
+      benchmark_machine(sc, leak_pit)
 
-    $collector.stop!
-  end
-
-  leak_pit = []
-  sc = benchmark_scenario.dup
-  GC.start
-  b.report("with reporting (10%, backtracie)") do
-    $collector.start!
-
-    benchmark_machine(sc, leak_pit)
-    File.open('tmp/benchmark.pb.gz', 'w') do |f|
-      f.write $collector.flush.pprof_data
+      $collector.stop!
     end
-    $collector.stop!
+
+    leak_pit = []
+    sc = benchmark_scenario.dup
+    GC.start
+    b.report("with reporting (#{perc}%, with flush)") do
+      $collector.start!
+
+      benchmark_machine(sc, leak_pit)
+      File.open("tmp/benchmark-#{perc}p.pb.gz", 'w') do |f|
+        f.write $collector.flush.pprof_data
+      end
+      $collector.stop!
+    end
   end
 end
