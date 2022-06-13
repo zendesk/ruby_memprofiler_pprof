@@ -58,7 +58,7 @@ void *mpp_xcalloc(size_t sz) {
 }
 
 void *mpp_xmalloc(size_t sz) {
-    void *mem = malloc(sz);
+    void *mem = ruby_xmalloc(sz);
     if (!mem) {
         MPP_ASSERT_FAIL("failed to allocate memory in ruby_memprofiler_pprof gem");
     }
@@ -66,11 +66,11 @@ void *mpp_xmalloc(size_t sz) {
 }
 
 void mpp_free(void *mem) {
-    free(mem);
+    ruby_xfree(mem);
 }
 
 void *mpp_realloc(void *mem, size_t newsz) {
-    void *newmem = realloc(mem, newsz);
+    void *newmem = ruby_xrealloc(mem, newsz);
     if (!newmem) {
         MPP_ASSERT_FAIL("failed to allocate memory in ruby_memprofiler_pprof gem");
     }
