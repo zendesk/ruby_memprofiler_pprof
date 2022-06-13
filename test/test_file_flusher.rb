@@ -12,13 +12,9 @@ end
 describe MemprofilerPprof::FileFlusher do
   before do
     @dir = Dir.mktmpdir
-    Timecop.freeze(Time.now)
-    setup_fake_sleep(MemprofilerPprof::BlockFlusher)
   end
 
   after do
-    MemprofilerPprof::BlockFlusher.unstub_sleep
-    Timecop.return
     FileUtils.remove_entry @dir
   end
 
@@ -35,8 +31,7 @@ describe MemprofilerPprof::FileFlusher do
   def wait_for_file_exist(file)
     5000.times do
       return if File.exist?(file)
-      sleep 5
-      MemprofilerPprof::BlockFlusher.advance_sleep 10
+      sleep 1
     end
     raise "File #{file} did not get created"
   end
@@ -46,7 +41,7 @@ describe MemprofilerPprof::FileFlusher do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
     flusher = MemprofilerPprof::FileFlusher.new(c,
       pattern: "#{@dir}/%{index}.pprof",
-      interval: 15,
+      interval: 2,
       logger: Logger.new(STDERR)
     )
 
@@ -75,7 +70,7 @@ describe MemprofilerPprof::FileFlusher do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
     flusher = MemprofilerPprof::FileFlusher.new(c,
       pattern: "#{@dir}/%{pid}-%{index}.pprof",
-      interval: 15,
+      interval: 2,
       logger: Logger.new(STDERR),
     )
 

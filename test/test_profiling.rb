@@ -16,40 +16,23 @@ describe MemprofilerPprof::Collector do
 
     c.start!
     1000.times { leak_into_bucket_1 }
-    profile_1 = DecodedProfileData.new c.flush
+    profile_1_data = c.flush
     1000.times { leak_into_bucket_2 }
-    profile_2 = DecodedProfileData.new c.flush
+    profile_2_data = c.flush
     $bucket = []
     1000.times { leak_into_bucket_2 }
     10.times { GC.start }
     # At this point, there _should_ be no more objects allocated by leak_into_bucket_1
-    profile_3 = DecodedProfileData.new c.flush
+    profile_3_data = c.flush
     c.stop!
+    
+    profile_1 = DecodedProfileData.new(profile_1_data)
+    profile_2 = DecodedProfileData.new(profile_2_data)
+    profile_3 = DecodedProfileData.new(profile_3_data)
 
     assert_operator profile_1.heap_samples_including_stack(['leak_into_bucket_1']).size, :>=, 1000
     assert_operator profile_2.heap_samples_including_stack(['leak_into_bucket_1']).size, :>=, 1000
     assert_operator profile_3.heap_samples_including_stack(['leak_into_bucket_1']).size, :<, 10
-  end
-
-  it 'captures all-ish allocations when sample rate is 1' do
-    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-    c.max_heap_samples = 1_000_000
-    # Warm up the symbol intern cache inside GC.stat
-    GC.stat(:total_allocated_objects)
-
-    objs_start = nil
-    objs_stop = nil
-    leak_list = []
-    profile_data = c.profile do
-      objs_start = GC.stat(:total_allocated_objects)
-      10000.times { leak_list << SecureRandom.hex(50) }
-      objs_stop = GC.stat(:total_allocated_objects)
-    end
-
-    pprof = DecodedProfileData.new(profile_data)
-    gc_stat_allocations = objs_stop - objs_start
-
-    assert_in_delta(gc_stat_allocations, pprof.total_retained_objects, 100)
   end
 
   it 'captures allocation sizes' do
@@ -98,45 +81,8 @@ describe MemprofilerPprof::Collector do
     c.profile do
       keep_live = big_array_compacting_method
       2.times { GC.compact }
+      keep_live = big_array_compacting_method
     end
-  end
-
-  it 'captures allocations in multiple ractors' do
-    skip "Ractors can't work with newobj tracepoints: https://bugs.ruby-lang.org/issues/18464"
-    skip "Ractors not available in Ruby #{RUBY_VERSION}" unless defined?(::Ractor)
-
-    def ractor1_method
-      SecureRandom.hex 50
-    end
-
-    def ractor2_method
-      SecureRandom.hex 50
-    end
-
-    c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
-    profile_data = c.profile do
-      r1 = Ractor.new do
-        1000.times do
-          Ractor.yield ractor1_method
-        end
-      end
-      r2 = Ractor.new do
-        1000.times do
-          Ractor.yield ractor2_method
-        end
-      end
-
-      loop do
-        Ractor.select(r1, r2)
-      end
-    end
-
-    pprof = DecodedProfileData.new(profile_data)
-    ractor1_stacks = pprof.samples_including_stack ['ractor1_method']
-    ractor2_stacks = pprof.samples_including_stack ['ractor2_method']
-
-    assert_operator ractor1_stacks, :>, 0
-    assert_operator ractor2_stacks, :>, 0
   end
 
   it 'respects max heap samples' do

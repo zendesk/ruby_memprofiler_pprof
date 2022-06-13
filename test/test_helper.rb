@@ -88,37 +88,3 @@ class DecodedProfileData
     end
   end
 end
-
-module FakeSleepSupport
-  def stub_sleep
-    @@sleep_mutex = Mutex.new
-    @@sleep_cvar = ConditionVariable.new
-    @@sleep_counter = 0
-
-    define_method :sleep do |n|
-      @@sleep_mutex.synchronize do
-        started = @@sleep_counter
-        while @@sleep_counter < (started + n)
-          @@sleep_cvar.wait(@@sleep_mutex)
-        end
-      end
-      n
-    end
-  end
-
-  def unstub_sleep
-    undef_method :sleep
-  end
-
-  def advance_sleep(n)
-    @@sleep_mutex.synchronize do
-      @@sleep_counter += n
-      @@sleep_cvar.broadcast
-    end
-  end
-end
-
-def setup_fake_sleep(clazz)
-  clazz.singleton_class.prepend(FakeSleepSupport) unless clazz.ancestors.include?(FakeSleepSupport)
-  clazz.stub_sleep
-end
