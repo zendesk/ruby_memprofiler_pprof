@@ -82,8 +82,10 @@ describe MemprofilerPprof::FileFlusher do
     parent_pid = Process.pid
     child_pid = fork do
       # Child process
-      leak_list <<  alloc_method_2
+      leak_list << alloc_method_2
       wait_for_file_exist "#{@dir}/#{Process.pid}-0.pprof"
+      c.stop!
+      flusher.stop!
       exit! 0
     end
     leak_list << alloc_method_3

@@ -10,16 +10,23 @@ module MemprofilerPprof
       @logger = logger
       @thread = nil
       @on_flush = on_flush
+      @status_mutex = Mutex.new
+      @status_cvar = ConditionVariable.new
+      @status = :not_started
     end
 
     def start!
       stop!
+      @status = :running
       @thread = Thread.new { flusher_thread }
       @atfork_handler = MemprofilerPprof::Atfork.at_fork(:child, &method(:at_fork_in_child))
     end
 
     def stop!
-      @thread&.kill
+      @status_mutex.synchronize do
+        @status = :stop
+        @status_cvar.broadcast
+      end
       @thread&.join
       @thread = nil
       @atfork_handler&.remove!
@@ -40,7 +47,20 @@ module MemprofilerPprof
     def flusher_thread
       prev_flush_duration = 0
       loop do
-        sleep([0, @interval - prev_flush_duration].max)
+        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        wait_until = now + [0, @interval - prev_flush_duration].max
+
+        catch :continue do
+          @status_mutex.synchronize do
+            loop do
+              return if @status != :running
+              now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              throw :continue if now >= wait_until
+              @status_cvar.wait(@status_mutex, wait_until - now)
+            end
+          end
+        end
+
         t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         begin
           profile_data = @collector.flush
