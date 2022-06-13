@@ -470,6 +470,12 @@ static VALUE collector_flush(VALUE self) {
     // Copy all the samples, and take a reference to them.
     cd->heap_samples_flush_copy_count = cd->heap_samples_count;
     cd->heap_samples_flush_copy = mpp_xmalloc(cd->heap_samples_flush_copy_count * sizeof(struct mpp_sample *));
+    // The above line _could_ have triggered a GC, so now there might be less samples.
+    if (cd->heap_samples_flush_copy_count > cd->heap_samples_count) {
+        cd->heap_samples_flush_copy_count = cd->heap_samples_count;
+    }
+    // Thankfully, st_values doesn't do anything that could trigger a GC (or yield back to Ruby), so we don't
+    // have to worry about what happens if something is deleted from the map while we're iterating it.
     st_values(cd->heap_samples, (st_data_t *)cd->heap_samples_flush_copy, cd->heap_samples_flush_copy_count);
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
         mpp_sample_refcount_inc(cd->heap_samples_flush_copy[i]);
