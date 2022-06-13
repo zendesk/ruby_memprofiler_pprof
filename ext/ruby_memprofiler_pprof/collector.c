@@ -6,8 +6,8 @@
 
 #include <ruby.h>
 #include <ruby/debug.h>
-#include <vm_core.h>
-#include <iseq.h>
+// Internal GC header, for rb_obj_memsize_of
+#include <internal/gc.h>
 
 #include "ruby_memprofiler_pprof.h"
 
@@ -324,6 +324,23 @@ static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VAL
 }
 
 static void collector_tphook_newobj(VALUE tpval, void *data) {
+    // If an object is created or freed during our newobj hook, Ruby refuses to recursively run
+    // the newobj/freeobj hook! It's just silently skipped. Thus, we can wind up missing
+    // some objects (not good), or we can wind up missing the fact that some objects
+    // were freed (even worse!).
+    // Thus, we have to make sure that
+    //   1) No Ruby objects are created in this method,
+    //   2) No Ruby objects are freed in this method,
+    // We achieve 1 by, well, not creating any Ruby objects. 2 would happen if the GC runs; one
+    // of the things that _can_ trigger the GC to run, unfortunately, is ruby_xmalloc() and
+    // friends (used internally by backtracie, and by st_hash, and also by this gem's malloc
+    // wrapper). So, we need to disable the GC, and re-enable it at the end of our hook.
+    // The normal "disable the GC" function, rb_gc_disable(), doesn't quite do it, because _that_
+    // calls rb_gc_rest() to finish off any in-progress collection! If we called that, we'd free
+    // objects, and miss removing them from our sample map. So, instead, we twiddle the dont_gc
+    // flag on the objspace directly with this compat wrapper.
+    VALUE gc_was_already_disabled = mpp_rb_gc_disable_no_rest();
+
     struct collector_cdata *cd = (struct collector_cdata *)data;
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
     VALUE newobj = rb_tracearg_object(tparg);
@@ -341,28 +358,35 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 
     // Skip the rest of this method if we're not sampling.
     if (mpp_rand() > cd->u32_sample_rate) {
-       return;
+       goto out;
     }
     // Make sure there's enough space in our buffer
     if (cd->heap_samples_count >= cd->max_heap_samples) {
         cd->dropped_samples_heap_bufsize++;
-        return;
+        goto out;
     }
 
     // OK, now it's time to add to our sample buffer.
     struct mpp_sample *sample = mpp_sample_new();
     sample->allocated_value_weak = newobj;
-
-    size_t required_bufsize = 0;
     sample->raw_backtrace = backtracie_bt_capture();
 
     // insert into live sample map
     int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);
     MPP_ASSERT_MSG(alread_existed == 0, "st_insert did an update in the newobj hook");
     cd->heap_samples_count++;
+
+out:
+    if (!RTEST(gc_was_already_disabled)) {
+        rb_gc_enable();
+    }
 }
 
+
 static void collector_tphook_freeobj(VALUE tpval, void *data) {
+    // See discussion about disabling GC in newobj tracepoint, it all applies here too.
+    VALUE gc_was_already_disabled = mpp_rb_gc_disable_no_rest();
+
     struct collector_cdata *cd = (struct collector_cdata *)data;
 
     // Definitely do _NOT_ try and run any Ruby code in here. Any allocation will crash
@@ -370,6 +394,10 @@ static void collector_tphook_freeobj(VALUE tpval, void *data) {
     rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
     VALUE freed_obj = rb_tracearg_object(tparg);
     collector_mark_sample_value_as_freed(cd, freed_obj);
+
+    if (!RTEST(gc_was_already_disabled)) {
+        rb_gc_enable();
+    }
 }
 
 static VALUE collector_start(VALUE self) {

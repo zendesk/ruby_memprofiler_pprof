@@ -3,8 +3,8 @@
 
 #include <pthread.h>
 #include <stdint.h>
-
 #include <ruby.h>
+#include <backtracie.h>
 
 // UPB header files trip up a BUNCH of -Wshorten-64-to-32
 // Also ignore -Wpragmas so that if -Wshorten-64-to-32 isn't present
@@ -16,11 +16,11 @@
 #include "pprof.upb.h"
 #pragma GCC diagnostic pop
 
-#include <vm_core.h>
-#include <method.h>
-#include <backtracie.h>
 
 // ======== COMPAT DECLARATIONS ========
+
+// Look anything up that needs to be done at runtime.
+void mpp_compat_init();
 
 // For handling differences in ruby versions
 #ifndef HAVE_RB_GC_MARK_MOVABLE
@@ -35,6 +35,8 @@
 #ifndef HAVE_RB_EXT_RACTOR_SAFE
 #define rb_ext_ractor_safe(x) do {} while (0)
 #endif
+
+VALUE mpp_rb_gc_disable_no_rest();
 
 // Apparently "I just want a random number, without thinking about whether it's
 // threadsafe, without thinking about whether some other part of the process needs

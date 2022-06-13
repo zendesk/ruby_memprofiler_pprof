@@ -4,7 +4,84 @@
 #include <stdarg.h>
 #include <stdlib.h>
 
+// for GET_VM
+#include <vm_core.h>
+
 #include "ruby_memprofiler_pprof.h"
+
+static bool malloc_allocated_size_enabled;
+
+void mpp_compat_init() {
+    if (rb_respond_to(rb_mGC, rb_intern("malloc_allocated_size"))) {
+        malloc_allocated_size_enabled = true;
+    } else {
+        malloc_allocated_size_enabled = false;
+    }
+
+    mpp_rand_init();
+}
+
+// We need to set the dont_gc flag directly on the objspace, WITHOUT running gc_rest().
+// This is exactly what rb_gc_disable_no_rest() does, but that's not exported (it's in
+// the internal header file, it's not static, but it's not exported with the right
+// symbol visibility, so we can't call it).
+// 
+// We _can_ get a pointer to the rb_objspace struct (it's available on the vm struct),
+// so to set the dont_gc flag, we "just" need to know what offset to poke it at.
+//
+// The "best" way I can think of to do that is to define a few versions of the rb_objspace
+// struct here, copied out of gc.c from various versions, and switch between them. The flags
+// are thankfully pretty close to the top of the struct, and thankfully dont_gc is the third
+// flag, so this is actually identical for all versions of Ruby >= 2.6 <= 3.1. Later flags
+// _do_ differ in position (and depending on various #define's too), but we don't need them.
+
+
+struct rb_objspace_head_with_allocated_size {
+    struct {
+        size_t limit;
+        size_t increase;
+        size_t allocated_size;
+        size_t allocations;
+    } malloc_params;
+
+    struct {
+        unsigned int mode : 2;
+        unsigned int immediate_sweep : 1;
+        unsigned int dont_gc : 1;
+        // Other flags follow, but we ignore them.
+    } flags;
+
+    // Other struct members follow, but we ignore them.
+};
+
+struct rb_objspace_head_without_allocated_size {
+    struct {
+        size_t limit;
+        size_t increase;
+    } malloc_params;
+
+    struct {
+        unsigned int mode : 2;
+        unsigned int immediate_sweep : 1;
+        unsigned int dont_gc : 1;
+    } flags;
+
+    // Other struct members follow, but we ignore them.
+};
+
+VALUE mpp_rb_gc_disable_no_rest() {
+    void *objspace = (void *)(GET_VM()->objspace);
+    int old_dont_gc;
+    if (malloc_allocated_size_enabled) {
+        old_dont_gc = ((struct rb_objspace_head_with_allocated_size *) objspace)->flags.dont_gc;
+        ((struct rb_objspace_head_with_allocated_size *) objspace)->flags.dont_gc = 1;
+    } else {
+        old_dont_gc = ((struct rb_objspace_head_without_allocated_size *) objspace)->flags.dont_gc;
+        ((struct rb_objspace_head_without_allocated_size *) objspace)->flags.dont_gc = 1;
+    }
+
+    return old_dont_gc ? Qtrue : Qfalse;
+}
 
 
 #if defined(HAVE_ARC4RANDOM)

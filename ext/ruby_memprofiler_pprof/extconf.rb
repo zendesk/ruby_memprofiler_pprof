@@ -21,9 +21,12 @@ raise "Zlib headers & library are required!" unless has_zlib_headers && has_zlib
 # Peek into internal Ruby headers
 require 'debase/ruby_core_source'
 internal_headers = proc {
-  have_header("vm_core.h") and
-    have_header("iseq.h", ["vm_core.h"]) and
-    have_header("version.h")
+  [
+    have_header("vm_core.h"),
+    have_header("iseq.h", ["vm_core.h"]),
+    have_header("version.h"),
+    have_func("rb_obj_memsize_of", ["internal/gc.h"]),
+  ].all?
 }
 
 # Need to actually link pthreads properly
@@ -32,7 +35,7 @@ have_library("pthread") or raise "missing pthread library"
 # Ruby >= 3.1 has deprecated/no-opp'd rb_gc_force_recycle, which is good for us, because
 # objects freed with that method do not get the freeobj tracepoint called on them.
 if RUBY_VERSION < "3.1"
-  $CFLAGS += " -DHAVE_WORKING_RB_GC_FORCE_RECYCLE "
+  append_cflags(['-DHAVE_WORKING_RB_GC_FORCE_RECYCLE'])
 end
 
 # Set our cflags up _only after_ we have run all the existence checks above; otherwise
