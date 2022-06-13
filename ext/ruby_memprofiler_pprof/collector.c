@@ -354,9 +354,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     sample->allocated_value_weak = newobj;
 
     size_t required_bufsize = 0;
-    backtracie_bt_capture(NULL, &required_bufsize);
-    void *backtracie_mem = mpp_xmalloc(required_bufsize);
-    sample->raw_backtrace = backtracie_bt_capture(backtracie_mem, &required_bufsize);
+    sample->raw_backtrace = backtracie_bt_capture();
 
     // insert into live sample map
     int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);

@@ -87,7 +87,7 @@ uint8_t mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_functab *f
         } else {
             // Haven't processed the sample into the functab; just release the raw backtracie.
             if (sample->raw_backtrace) {
-                mpp_free(sample->raw_backtrace);
+                backtracie_bt_free(sample->raw_backtrace);
             }
         }
         mpp_free(sample);
@@ -123,7 +123,7 @@ void mpp_sample_process(struct mpp_sample *sample, struct mpp_functab *functab) 
     }
 
     // It worked, flip the sample into "processed" mode.
-    mpp_free(sample->raw_backtrace);
+    backtracie_bt_free(sample->raw_backtrace);
     sample->raw_backtrace = NULL;
     sample->flags |= MPP_SAMPLE_FLAGS_BT_PROCESSED;
     sample->processed_backtrace = ctx.bt_processed;
