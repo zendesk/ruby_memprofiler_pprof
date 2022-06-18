@@ -9,29 +9,35 @@ struct sample_process_protected_ctx {
     uint32_t frame_count;
 };
 VALUE sample_process_protected(VALUE ctxarg);
+void add_values_to_mark_memo(VALUE value, void *ctxarg);
+void delete_values_from_mark_memo(VALUE value, void *ctxarg);
 
-struct mpp_sample *mpp_sample_new() {
+struct mpp_sample *mpp_sample_new(VALUE allocated_value, backtracie_bt_t raw_backtrace, struct mpp_mark_memoizer *mark_memo) {
     struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
     sample->flags = 0;
     sample->refcount = 1;
-    sample->allocated_value_weak = Qundef;
-    sample->raw_backtrace = NULL;
+    sample->allocated_value_weak = allocated_value;
+    sample->raw_backtrace = raw_backtrace;
+    backtracie_bt_gc_mark_custom(raw_backtrace, add_values_to_mark_memo, mark_memo);
     return sample;
+}
+
+void add_values_to_mark_memo(VALUE value, void *ctxarg) {
+    struct mpp_mark_memoizer *mark_memo = (struct mpp_mark_memoizer *)ctxarg;
+    mpp_mark_memoizer_add(mark_memo, value);
+}
+
+void delete_values_from_mark_memo(VALUE value, void *ctxarg) {
+    struct mpp_mark_memoizer *mark_memo = (struct mpp_mark_memoizer *)ctxarg;
+    mpp_mark_memoizer_delete(mark_memo, value);
 }
 
 void mpp_sample_gc_mark(struct mpp_sample *sample) {
     if (sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) {
         // "processed" sample - nothing to mark!
     } else {
-        // "raw" sample - need to mark the underlying backtracie stuff.
-        if (sample->raw_backtrace) {
-#ifdef HAVE_RB_GC_MARK_MOVABLE
-            backtracie_bt_gc_mark_moveable(sample->raw_backtrace);
-#else
-            backtracie_bt_gc_mark(sample->raw_backtrace);
-#endif
-        }
-
+        // "raw" sample - we _would_ need to mark the underlying backtracie stuff,
+        // but it's in the mark memoizer map, so that should take care of marking it (once)
     }
 }
 
@@ -71,7 +77,7 @@ uint8_t mpp_sample_refcount_inc(struct mpp_sample *sample) {
     return sample->refcount;
 }
 
-uint8_t mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_functab *functab) {
+uint8_t mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_functab *functab, struct mpp_mark_memoizer *mark_memo) {
     MPP_ASSERT_MSG(sample->refcount, "mpp_sample_refcount_dec: tried to decrement zero refcount!");
     sample->refcount--;
     if (!sample->refcount) {
@@ -87,6 +93,7 @@ uint8_t mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_functab *f
         } else {
             // Haven't processed the sample into the functab; just release the raw backtracie.
             if (sample->raw_backtrace) {
+                backtracie_bt_gc_mark_custom(sample->raw_backtrace, delete_values_from_mark_memo, mark_memo);
                 backtracie_bt_free(sample->raw_backtrace);
             }
         }
@@ -96,7 +103,7 @@ uint8_t mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_functab *f
     return sample->refcount;
 }
 
-void mpp_sample_process(struct mpp_sample *sample, struct mpp_functab *functab) {
+void mpp_sample_process(struct mpp_sample *sample, struct mpp_functab *functab, struct mpp_mark_memoizer *mark_memo) {
     MPP_ASSERT_MSG(!(sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED), "mpp_sample_process called on already processed sample");
     MPP_ASSERT_MSG(sample->raw_backtrace, "mpp_sample_process called on sample with no backtrace");
     MPP_ASSERT_MSG(sample->refcount, "mpp_sample_process called with zero refcount");
@@ -123,6 +130,7 @@ void mpp_sample_process(struct mpp_sample *sample, struct mpp_functab *functab) 
     }
 
     // It worked, flip the sample into "processed" mode.
+    backtracie_bt_gc_mark_custom(sample->raw_backtrace, delete_values_from_mark_memo, mark_memo);
     backtracie_bt_free(sample->raw_backtrace);
     sample->raw_backtrace = NULL;
     sample->flags |= MPP_SAMPLE_FLAGS_BT_PROCESSED;

@@ -257,7 +257,7 @@ static void collector_gc_free_heap_samples(struct collector_cdata *cd) {
 static int collector_gc_free_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
     struct mpp_sample *sample = (struct mpp_sample *)value;
     struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
-    mpp_sample_refcount_dec(sample, cd->function_table);
+    mpp_sample_refcount_dec(sample, cd->function_table, cd->mark_memo);
     return ST_CONTINUE;
 }
 
@@ -334,7 +334,7 @@ static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VAL
     if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
         // We deleted it out of live objects; free the sample
         mpp_sample_mark_value_freed(sample);
-        mpp_sample_refcount_dec(sample, cd->function_table);
+        mpp_sample_refcount_dec(sample, cd->function_table, cd->mark_memo);
         cd->heap_samples_count--;
     }
 }
@@ -383,9 +383,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     }
 
     // OK, now it's time to add to our sample buffer.
-    struct mpp_sample *sample = mpp_sample_new();
-    sample->allocated_value_weak = newobj;
-    sample->raw_backtrace = backtracie_bt_capture();
+    struct mpp_sample *sample = mpp_sample_new(newobj, backtracie_bt_capture(), cd->mark_memo);
 
     // insert into live sample map
     int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);
@@ -560,7 +558,7 @@ static VALUE collector_flush(VALUE self) {
     if (serctx) mpp_pprof_serctx_destroy(serctx);
     if (cd->heap_samples_flush_copy) {
         for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
-            mpp_sample_refcount_dec(cd->heap_samples_flush_copy[i], cd->function_table);
+            mpp_sample_refcount_dec(cd->heap_samples_flush_copy[i], cd->function_table, cd->mark_memo);
         }
         mpp_free(cd->heap_samples_flush_copy);
         cd->heap_samples_flush_copy = NULL;
@@ -586,7 +584,7 @@ static VALUE flush_process_samples(VALUE ctxarg) {
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
         struct mpp_sample *sample = cd->heap_samples_flush_copy[i];
         if (!(sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) && !(sample->flags & MPP_SAMPLE_FLAGS_VALUE_FREED)) {
-            mpp_sample_process(sample, cd->function_table);
+            mpp_sample_process(sample, cd->function_table, cd->mark_memo);
         }
     }
     return Qnil;

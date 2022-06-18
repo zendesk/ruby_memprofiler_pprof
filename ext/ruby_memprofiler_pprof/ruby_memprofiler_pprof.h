@@ -333,7 +333,10 @@ struct mpp_sample {
 };
 
 // Creates a new sample with zero flags and 1 refcount
-struct mpp_sample *mpp_sample_new();
+// It requires a reference to a mark memoizer structure, and the raw
+// backtrace which the sample starts with. The VALUEs from the raw backtrace
+// get put in the mark memoizer cache.
+struct mpp_sample *mpp_sample_new(VALUE allocated_value, backtracie_bt_t raw_backtrace, struct mpp_mark_memoizer *mark_memo);
 // Mark any contained Ruby VALUEs
 void mpp_sample_gc_mark(struct mpp_sample *sample);
 #ifdef HAVE_RB_GC_MARK_MOVABLE
@@ -345,10 +348,10 @@ size_t mpp_sample_memsize(struct mpp_sample *sample);
 // Increments the refcount on sample
 uint8_t mpp_sample_refcount_inc(struct mpp_sample *sample);
 // Decrements the refcount on sample, freeing its resources if it drops to zero.
-uint8_t mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_functab *functab);
+uint8_t mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_functab *functab, struct mpp_mark_memoizer *mark_memo);
 // "Processes" the sample. This involves walking the backtracie frames, stringifying all method names,
 // and interning the strings & function definitions into the provided functab.
-void mpp_sample_process(struct mpp_sample *sample, struct mpp_functab *functab);
+void mpp_sample_process(struct mpp_sample *sample, struct mpp_functab *functab, struct mpp_mark_memoizer *mark_memo);
 // Mark the sample as freed (as in, the underlying value is freed)
 void mpp_sample_mark_value_freed(struct mpp_sample *sample);
 
