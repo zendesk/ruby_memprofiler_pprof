@@ -51,6 +51,7 @@ append_cflags([
   '-Wno-unused-parameter',
   '-Wno-declaration-after-statement',
   '-Wno-suggest-attribute=noreturn',
+  '-Wno-suggest-attribute=format',
 ])
 
 # Compile the upb objects into our extension as well.
