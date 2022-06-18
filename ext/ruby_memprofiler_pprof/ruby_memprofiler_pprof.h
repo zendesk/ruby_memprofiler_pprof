@@ -194,9 +194,20 @@ void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *c
 // attempt to reduce this by instead keeping a refcounted list of these objects, and marking them once each
 // rather than once for every place that it appears.
 
+struct mpp_mark_memoizer_el {
+    VALUE value;
+    unsigned int refcount;
+};
+
 struct mpp_mark_memoizer {
-    // Mapping of VALUE -> refcount of this VALUE.
-    st_table *table;
+    // Sorted array of items to be marked
+    struct mpp_mark_memoizer_el *sorted_list;
+    size_t sorted_list_capacity;
+    size_t sorted_list_current_size;
+    // Unsorted array of items yet to be added to the sorted list.
+    struct mpp_mark_memoizer_el *unsorted_list;
+    size_t unsorted_list_capacity;
+    size_t unsorted_list_current_size;
 };
 
 struct mpp_mark_memoizer *mpp_mark_memoizer_new();
