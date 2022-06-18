@@ -80,7 +80,7 @@ void mpp_assert_fail(const char *msg, const char *assertion, const char *file, c
             mpp_assert_fail((msg), #expr, __FILE__, MPP_ASSERT__LINE, __func__);    \
         }                                                                           \
     } while (0)
-#define MPP_ASSERT_FAIL(expr) MPP_ASSERT_MSG(expr, 0)
+#define MPP_ASSERT_FAIL(msg) MPP_ASSERT_MSG(0, msg)
 
 // Log a debug message to "somewhere". This could be smarter in future, but for now, this'll do.
 // The implementation here does not depend on holding the GVL.
