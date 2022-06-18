@@ -53,6 +53,8 @@ struct collector_cdata {
     struct mpp_strtab *string_table;
     // Same thing, but for function locations
     struct mpp_functab *function_table;
+    // Used as a refcounted map of VALUEs to avoid marking them multiple times per mark cycle
+    struct mpp_mark_memoizer *mark_memo;
 };
 
 static struct collector_cdata *collector_cdata_get(VALUE self);
@@ -154,6 +156,7 @@ static VALUE collector_alloc(VALUE klass) {
     cd->dropped_samples_heap_bufsize = 0;
     cd->string_table = NULL;
     cd->function_table = NULL;
+    cd->mark_memo = NULL;
     return v;
 }
 
@@ -183,6 +186,7 @@ static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
 
     cd->string_table = mpp_strtab_new();
     cd->function_table = mpp_functab_new(cd->string_table);
+    cd->mark_memo = mpp_mark_memoizer_new();
     cd->heap_samples = st_init_numtable();
     cd->heap_samples_count = 0;
 
@@ -206,6 +210,9 @@ static void collector_cdata_gc_mark(void *ptr) {
             mpp_sample_gc_mark(cd->heap_samples_flush_copy[i]);
         }
     }
+
+    // Mark the memoized marking cache
+    mpp_mark_memoizer_mark(cd->mark_memo);
 }
 
 static int collector_gc_mark_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
@@ -231,6 +238,9 @@ static void collector_gc_free(void *ptr) {
     }
     if (cd->string_table) {
         mpp_strtab_destroy(cd->string_table);
+    }
+    if (cd->mark_memo) {
+        mpp_mark_memoizer_destroy(cd->mark_memo);
     }
 
     ruby_xfree(ptr);
@@ -264,6 +274,9 @@ static size_t collector_gc_memsize(const void *ptr) {
     if (cd->function_table) {
         sz += mpp_functab_memsize(cd->function_table);
     }
+    if (cd->mark_memo) {
+        sz += mpp_mark_memoizer_memsize(cd->mark_memo);
+    }
 
     return sz;
 }
@@ -292,6 +305,9 @@ static void collector_cdata_gc_compact(void *ptr) {
             mpp_sample_gc_compact(cd->heap_samples_flush_copy[i]);
         }
     }
+
+    // Handle moving with the mark memoizer
+    mpp_mark_memoizer_compact(cd->mark_memo);
 }
 
 static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {

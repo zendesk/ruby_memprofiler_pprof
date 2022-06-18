@@ -187,6 +187,31 @@ int64_t mpp_strtab_index_of(struct mpp_strtab_index *ix, const char *interned_pt
 typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size_t interned_str_len, void *ctx);
 void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *ctx);
 
+// ======== MARKMEMOIZER DECLARATIONS ========
+
+// When holding references to lots of backtracie objects, which in turn contain references to the Ruby iseq
+// & self, actually going around to mark them all can take a significant amount of time during GC. We can
+// attempt to reduce this by instead keeping a refcounted list of these objects, and marking them once each
+// rather than once for every place that it appears.
+
+struct mpp_mark_memoizer {
+    // Mapping of VALUE -> refcount of this VALUE.
+    st_table *table;
+};
+
+struct mpp_mark_memoizer *mpp_mark_memoizer_new();
+void mpp_mark_memoizer_destroy(struct mpp_mark_memoizer *memo);
+// Inserts VALUE into the memoizer, or else bumps its refcount. Returns the new refcount.
+unsigned int mpp_mark_memoizer_add(struct mpp_mark_memoizer *memo, VALUE value);
+// Decrements refcount of VALUE, possibly removing from the map. Returns the new refcount.
+unsigned int mpp_mark_memoizer_delete(struct mpp_mark_memoizer *memo, VALUE value);
+// Marks all the objects in the memoizer (once)
+void mpp_mark_memoizer_mark(struct mpp_mark_memoizer *memo);
+// Handles GC compaction
+void mpp_mark_memoizer_compact(struct mpp_mark_memoizer *memo);
+// Returns the memsize of this memoizer.
+size_t mpp_mark_memoizer_memsize(struct mpp_mark_memoizer *memo);
+
 // ======== FUNCTAB DECLARATIONS ========
 
 // The pprof format requires that functions in samples be referred to by an integer "function_id". The format
