@@ -25,6 +25,9 @@ struct collector_cdata {
     uint32_t u32_sample_rate;
     // This flag is used to make sure we detach our tracepoints as we're getting GC'd.
     bool is_tracing;
+    // If we're flushing, this contains the thread that's doing the flushing. This is used
+    // to exclude allocations from that thread from heap profiling.
+    VALUE flush_thread;
 
     // ======== Heap samples ========
     // A hash-table keying live VALUEs to their struct mpp_sample. This is _not_ cleared
@@ -145,6 +148,7 @@ static VALUE collector_alloc(VALUE klass) {
 
     cd->newobj_trace = Qnil;
     cd->freeobj_trace = Qnil;
+    cd->flush_thread = Qnil;
 
     cd->u32_sample_rate = 0;
     cd->is_tracing = false;
@@ -200,6 +204,7 @@ static void collector_cdata_gc_mark(void *ptr) {
     rb_gc_mark_movable(cd->mMemprofilerPprof);
     rb_gc_mark_movable(cd->cCollector);
     rb_gc_mark_movable(cd->cProfileData);
+    rb_gc_mark_movable(cd->flush_thread);
 
     // Mark all the iseqs/CME's we have stored in the heap sample map
     st_foreach(cd->heap_samples, collector_gc_mark_each_heap_sample, 0);
@@ -297,6 +302,7 @@ static void collector_cdata_gc_compact(void *ptr) {
     cd->mMemprofilerPprof = rb_gc_location(cd->mMemprofilerPprof);
     cd->cCollector = rb_gc_location(cd->cCollector);
     cd->cProfileData = rb_gc_location(cd->cProfileData);
+    cd->flush_thread = rb_gc_location(cd->flush_thread);
     st_foreach(cd->heap_samples, collector_compact_each_heap_sample, (st_data_t)cd);
 
     // If we're in the middle of a call to #flush and have a copy, move those too.
@@ -357,11 +363,14 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     // flag on the objspace directly with this compat wrapper.
     VALUE gc_was_already_disabled = mpp_rb_gc_disable_no_rest();
 
+    rb_trace_arg_t *tparg;
+    VALUE newobj;
     struct collector_cdata *cd = (struct collector_cdata *)data;
-    rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
-    VALUE newobj = rb_tracearg_object(tparg);
 
 #ifdef HAVE_WORKING_RB_GC_FORCE_RECYCLE
+    tparg = rb_tracearg_from_tracepoint(tpval);
+    newobj = rb_tracearg_object(tparg);
+
     // Normally, any object allocated that calls the newobj hook will be freed during GC,
     // and the freeobj tracepoint will then be called. Thus, any object added to the heap sample
     // map will be removed before a different object in the same slot is creeated.
@@ -371,16 +380,31 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     // slot. Handle that by marking an existing object in the sample map as "free'd".
     collector_mark_sample_value_as_freed(cd, newobj);
 #endif
-
     // Skip the rest of this method if we're not sampling.
     if (mpp_rand() > cd->u32_sample_rate) {
        goto out;
+    }
+    // Don't profile allocations that were caused by the flusher; these allocations are
+    //     1) numerous,
+    //     2) probably not of interest,
+    //     3) guaranteed not to actually make it into a heap usage profile anyway, since
+    //        they get freed at the end of the flushing routine.
+    if (rb_thread_current() == cd->flush_thread) {
+        goto out;
     }
     // Make sure there's enough space in our buffer
     if (cd->heap_samples_count >= cd->max_heap_samples) {
         cd->dropped_samples_heap_bufsize++;
         goto out;
     }
+
+#ifndef HAVE_WORKING_RB_GC_FORCE_RECYCLE
+    // If we don't need to do the "check every object to see if it was freed" check,
+    // we can defer actually calling these functions until we've decided whether or not
+    // to sample.
+    tparg = rb_tracearg_from_tracepoint(tpval);
+    newobj = rb_tracearg_object(tparg);
+#endif
 
     // OK, now it's time to add to our sample buffer.
     struct mpp_sample *sample = mpp_sample_new(newobj, backtracie_bt_capture(), cd->mark_memo);
@@ -478,6 +502,8 @@ static VALUE collector_flush(VALUE self) {
         goto out;
     }
 
+    cd->flush_thread = rb_thread_current();
+
     size_t dropped_samples_bufsize = cd->dropped_samples_heap_bufsize;
     cd->dropped_samples_heap_bufsize = 0;
 
@@ -567,6 +593,7 @@ static VALUE collector_flush(VALUE self) {
     if (heap_samples_sizes) {
         mpp_free(heap_samples_sizes);
     }
+    cd->flush_thread = Qnil;
 
     // Now return-or-raise back to ruby.
     if (jump_tag) {
