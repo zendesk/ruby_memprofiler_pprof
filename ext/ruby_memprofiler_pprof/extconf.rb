@@ -44,6 +44,7 @@ append_cflags([
   '-g', # Compile with debug info
   '-D_GNU_SOURCE', '-std=gnu11', # Use GNU C extensions (e.g. we use this for atomics)
   '-fvisibility=hidden', # Make sure our upb symbols don't clobber any others from other exts
+  '-fno-optimize-sibling-calls',
 ])
 append_cflags(['-Wall', '-Wextra']) # Enable all the warnings
 # These diagnostics are not very interesting at all, just disable them.
