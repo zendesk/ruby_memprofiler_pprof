@@ -67,24 +67,27 @@ with reporting (100%, with flush)     95.083065   0.099887  95.182952 ( 95.28691
 
 ## Keeping track of object liveness
 
-TODO - this is actually wrong; fix.
-
-
 In theory, what we need to do to generate profiles of retained, unfreed objects is fairly simple; when our newobj tracepoint hook is called, add the object into a hashmap (keyed by its VALUE), and when the freeobj hook is called, remove that VALUE from the hashmap. Unfortunately, it's not _quite_ that simple.
 
-Firstly, there's the problem of sampling. As mentioned in the main documentation, RMP is designed to work by sampling N% of allocations, and building up a holistic picture of memory usage by combining profiles from multiple instances of your application. Ideally, we would simply skip over the newobj or freeobj tracepoint (100 - N)% of the time without doing any work at all; however, we always need to _look_ in the live object hashmap for the object in our freeobj hook, because we don't magically know _which_ N% of allocations made their way into that map.
+### Sampling
 
-More concerningly, there are circumstances where Ruby calls newobj for an object, without ever calling freeobj on it at all! This seems to happen most often, that I've seen, for objects of time `T_IMEMO` (which represent pieces of Ruby code, as far as I can tell). There are a couple of tricky parts of handling this.
+Firstly, There's the problem of sampling. As mentioned in the main documentation, RMP is designed to work by sampling N% of allocations, and building up a holistic picture of memory usage by combining profiles from multiple instances of your application. Ideally, we would simply skip over the newobj or freeobj tracepoint (100 - N)% of the time without doing any work at all; however, we always need to _look_ in the live object hashmap for the object in our freeobj hook, because we don't magically know _which_ N% of allocations made their way into that map.
 
-Firstly, our newobj hook could be called twice for the same VALUE, without a freeobj for it in the interim. We can detect this by checking to see in our newobj hook whether or not the VALUE is already in the live object map. If so, treat that as a free of that VALUE first, and _then_ follow the new-object path.
+### Recursive hook non-execution
 
-Secondly, at any given point, we have to treat any VALUE as if it might have become invalid while we weren't looking. We can't assume that if freeobj hasn't removed an object from the map, that it's actually still valid. In practice, this turns into a bunch of checks to see if VALUEs are T_NONE before touching them (it seems, when Ruby does internally "free" an object without calling our freeobj hook, it zeros the objects type out to T_NONE).
+Secondly, Ruby refuses to run newobj/freeobj hooks re-entrantly. If an object is allocated inside a newobj hook, the newobj hook will NOT be called recursively on that object. If the newobj hook triggers a GC, and an object is therefore freed, the freeobj hook will NOT be called either.
 
-Finally, it means we also have to check that VALUES are not T_NONE whilst generating the pprof report; otherwise, we would be counting that object as still live when in fact it has been freed.
+This means that any object we allocate inside the newobj hook won't be included in heap samples (slightly annoying, but not a dealbreaker), but also that we might miss the fact that an object is freed if GC is triggered in the newobj hook (huge problem; trashes the accuracy of our data). GC can be triggered even in the absence of allocating any Ruby objects, too (`ruby_xmalloc` can trigger it).
+
+So, to work around this, we disable GC during our newobj hook. The catch is, we can't quite do that by simply calling `rb_gc_disable`; that actually _completes_ any in-progress GC sweep before returning, which does exactly what we _don't_ want (causes objects to be freed whilst we're in a newobj tracepoint hook, thus causing their freeobj hooks to not fire). We hacked around this, for now, by directly flipping the `dont_gc` bit on the `rb_objspace` struct to temporarily disable (and then re-enable later) GC.
+
+### rb_gc_force_recycle
+
+In Ruby versions < 3.1, there's an API `rb_gc_force_recycle`, which directly marks an object as freed without going through machinery like running freeobj tracepoint hooks. This is used in the standard library in a few places, and results in a situation where our newobj hook could be called twice for the same VALUE, without a freeobj for it in the interim.
+
+We can detect this by checking to see in our newobj hook whether or not the VALUE is already in the live object map. If so, treat that as a free of that VALUE first, and _then_ follow the new-object path. This is probably good enough, since most usages of `rb_gc_force_recycle` are to "free" otherwise very short lived objects, so it's very likely the VALUE will be re-used for another object pretty soon. So hopefully it won't distort the heap profiles too much.
 
 ## Deferred size measurement
-
-TODO - this is also outdated and wrong.
 
 As well as recording the fact that an object was allocated, we'd like to record the size of the allocation too. Ruby provides a method for this, `rb_obj_memsize_of()`, which will tell you the total size of the memory backing a given VALUE - both the size it occupies in the [Ruby heap](https://jemma.dev/blog/gc-compaction), as well as any other malloc'd memory reported for the object, e.g. as reported by a C extension thorugh it's `.dsize` callback.
 
@@ -93,11 +96,7 @@ Unfortunately, we can't call `rb_obj_memsize_of` on an object in the newobj trac
 * That would only return the size of the object on the Ruby heap (i.e. for most Ruby versions, 40 bytes). The off-heap storage for e.g. a large array or string won't have actually been allocated yet at this point of constructing the Array or String.
 * On new Ruby versions >= 3.1 with variable-width allocations, `rb_obj_memsize_of` actually crashes when calling it on an object at this point of its lifecycle. I've observed this happening with T_CLASS objects, because their ivar tables (stored inside the variable-width part of the RVALUE) are not set up at this point. This is a similar problem to [this bug](https://bugs.ruby-lang.org/issues/18795).
 
-The solution for both of these problems is the same. In the newobj tracepoint, instead of measuring the objects size, add it to a list of "pending size measurement" objects. Then, at some later point, go through the list and call `rb_obj_memsize_of` on them.
-
-What should the "later point" be? For now, I settled on defining a creturn tracepoint hook to do this. Every time a ruby function implemented in C transferrs control back to Ruby, the creturn hook should fire. Since all object allocations need to happen in C (or, if I'm wrong about this, enough do that this tracepoint gets fired very often anyway), this should fire our creturn tracepoint "pretty soon" after the object has been created and hopefully before its size has changed too much from then!
-
-It ultimately doesn't matter too much, I believe, because we _also_ call `rb_obj_memsize_of` on live objects again when constructing the retained object profile on flush, and it's the size of the objects that are not immediately freed that is probably of most use when profiling the memory usage of an application.
+Thankfully, the "solution" here is pretty simple. We only need to record the size of the object whilst creating our profile pprof file anyway, so only measure it then. It actually turns into a bit of a non-issue, but I'm keeping the section here discussing the fact that `rb_obj_memsize_of` can't be used in a newobj tracepoint for documentation purposes.
 
 ## UPB: C protobuf library
 
