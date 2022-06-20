@@ -4,11 +4,11 @@ This document contains some notes about how the inside of the `ruby_memprofiler_
 
 ## Concepts
 
-The core idea of RMP is to trap every object allocation and free. When an object is allocated, RMP collects details of what was allocated as well as a full Ruby backtrace of what code led to the allocation. This is saved in two places; in a singly linked list of allocation samples, and in a hashtable of heap samples. When the object is freed, the sample is removed from the heap sample map (but NOT from the allocation sample list).
+The core idea of RMP is to trap every object allocation and free. When an object is allocated, RMP collects details of what was allocated as well as a full Ruby backtrace of what code led to the allocation. This is saved in a hashtable of heap samples. When the object is freed, the sample is removed from the heap sample map.
 
-When `#flush` is called on the collector, that creates the pprof data, containing one set of measurements for what was in the allocation sample list (that's `allocations`/`allocations_size`), and another set of measurements for what's in the heap sample map (that's `retained_objects`/`retained_size`). Once the pprof data is generated, the allocation sample list is cleared.
+When `#flush` is called on the collector, that creates the pprof data, the collector walks all the (still-live) objects in the heap sample map and measures their size with `rb_obj_memsize_of`; it records both the number of live allocations (`retained_objects`) and their size (`retained_size`) and emits these into the pprof protobuf data.
 
-Thus, in each profile, you see what codepaths allocated memory since the last profile flush, and what codepaths allocated memory (since profiling started) that's still alive at the time the profile was generated.
+Thus, in each profile, you see what codepaths allocated memory (since profiling started) that's still alive at the time the profile was generated.
 
 ## C extension implementation
 
@@ -28,53 +28,47 @@ There is, however, an undocumented pair of events for this: `RUBY_INTERNAL_EVENT
 
 So, in order to have Ruby call our extension C code when Ruby objects are created or destroyed, we use `rb_tracepoint_new(RUBY_INTERNAL_EVENT_NEWOBJ, ...)` and `rb_tracepoint_new(RUBY_INTERNAL_EVENT_FREEOBJ, ...)`.
 
-## Ruby backtrace collection
+## Ruby backtrace collection (backtracie)
 
 Inside our newobj tracepoint handler, we want to collect a backtrace of what current Ruby code caused this object to be allocated. The `objspace` gem from the previous extension does something _like_ this; the [`#allocation_sourcefile`](https://ruby-doc.org/stdlib-3.1.0/libdoc/objspace/rdoc/ObjectSpace.html#method-c-allocation_sourcefile) & [`#allocation_sourceline`](https://ruby-doc.org/stdlib-3.1.0/libdoc/objspace/rdoc/ObjectSpace.html#method-c-allocation_sourceline) methods it provides gives the file and line number that caused an allocation to happen. This is implemented by calling the `rb_tracearg_path` & `rb_tracearg_lineno` methods [inside the tracepoint](https://github.com/ruby/ruby/blob/v3_1_2/ext/objspace/object_tracing.c#L79).
 
 However, we want to do better than this; the single Ruby file & line number might usefully identify some codepaths, but very often that will simply point to some piece of shared code called from many different places; that's not enough to tell you what your application was doing to cause the allocation. This is why we want a full backtrace instead; the complete sequence of calls that lead to a particular allocation happening.
 
-To get a backtrace of the Ruby code from our tracepoint handler, we have a few options.
+In Ruby, it's possible to get a backtrace by calling [`Thread.current.backtrace_locations`](https://ruby-doc.org/core-3.1.0/Thread.html#method-i-backtrace_locations). This returns an array of [`Thread::Backtrace::Location`](https://ruby-doc.org/core-3.1.0/Thread/Backtrace/Location.html) structures, which gives us goodies like the filename, line number, and method name. This is exactly the information we're after to put in our profile! 
 
-### `Thread#backtrace_locations`
+Unfortunately, it's tremendously, tremendously slow - mostly because it must allocate a whole bunch of Ruby strings to hold various parts of the backtrace. Furthermore, most allocations in Ruby are freed soon after, and most likely before `#flush` is called to emit a pprof profile. So, we go to all this effort to stringify a backtrace, only to throw it out without it ever appearing in a profile.
 
-In Ruby code, it's possible to get a backtrace by calling [`Thread.current.backtrace_locations`](https://ruby-doc.org/core-3.1.0/Thread.html#method-i-backtrace_locations). This returns an array of [`Thread::Backtrace::Location`](https://ruby-doc.org/core-3.1.0/Thread/Backtrace/Location.html) structures, which gives us goodies like the filename, line number, and method name. This is exactly the information we're after to put in our profile!
+To solve these problems, we instead generate backtraces using the [Backtracie gem](https://github.com/ivoanjo/backtracie/).
 
-Unfortunately, it's tremendously, tremendously slow. This allocates a whole bunch of Ruby objects to hold the various parts of the backtrace, and each of those must call _back into_ our newobj tracepoint. At a 100% sampling rate, this would never terminate; at even very low sampling rates (e.g. 1% or so) it still seems to add a lot of overhead. There's a benchmark script in the repo to demonstrate how slow this is - see the end of this section for some benchmark results!
+Backtracie collects backtraces in two stages. First, it constructs a [`raw_location`](https://github.com/ivoanjo/backtracie/blob/5cb1db0f09829166460e5a2851f000c87d158ffa/ext/backtracie_native_extension/ruby_shards.h#L117) struct capturing the nescessary data (e.g. iseq (instruction sequence) or cme (callable method entry) pointers, and self objects). This is done by directly reaching into VM private data structures - either also using `debase-ruby_core_source`, or with the MJIT private header, depending on the Ruby version. Then, it converts this raw data into a string backtrace representation in a seprate step.
 
-### `rb_make_backtrace()`
+One of the main motivations for the Backtracie project is to produce backtraces with much richer data than using Ruby's standard backtrace APIs (for example, including class names). This is good for ruby_memprofiler_pprof, but on its own, this wouldn't solve our performance problems. 
 
-Ruby has a function [`rb_make_backtrace`](https://github.com/ruby/ruby/blob/v3_1_2/include/ruby/internal/intern/vm.h#L431) exported in the C API which returns a Ruby array of Ruby strings of the form `"file:lineno:in 'method'"`. This is not ideal for our purposes, because it means we have to do string manipulation/integer parsing to split that up. More importantly, however, its implemented internally in an identical way to `Thread#backtrace_locations`, so it's just as slow. 
+We have (temporarily!) [forked Backtracie](https://github.com/KJTsanaktsidis/backtracie/tree/ktsanaktsidis/c_public_v2) to give it a C API which allows separating those two stages. In the `newobj` tracepoint handler, we do the "capturing" step, and keep only the `raw_location` structures around in the live sample map. Then, when producing the pprof profile during `#flush`, we do the second "stringifying" step. In this way, we only have to pay this cost for allocations which _actually_ live long enough to make it into a profile.
 
-### `rb_profile_frames()`
-
-I didn't actually find [`rb_profile_frames`](https://github.com/ruby/ruby/blob/v3_1_2/include/ruby/debug.h#L51) when doing the initial implementation of this gem (I believe the doc comment there is actually new, although the function goes back to at least 2.6). It actually looks promising, and I'm going to try it out at some point.
-
-### Manually walking CFP frames
-
-If we want to avoid allocating Ruby objects, it seemed the best way to parse its data structures in C code rather than using any of the provided APIs which deal in VALUE's (the C type representing Ruby objects). I implemented this by more-or-less copying wholesale the implementation of [`backtrace_each()`](https://github.com/ruby/ruby/blob/v3_1_2/vm_backtrace.c#L855) out of the Ruby source code. In order to make this actually compile, we need definitions from some internal Ruby headers (specifically, the layout of the `rb_control_frame_t` structure, and the implementation of the `RUBY_VM_*_CONTROL_FRAME` family of macros, plus a few others). These definitions are of course normally inaccessible to C extensions, but in our case are provided by the `debase-ruby_core_source` gem.
-
-The resulting code (`mpp_rb_backtrace_capture` in [`backtrace.c`](ext/ruby_memprofiler_pprof/backtrace.c)) walks Ruby's internal control frame structure directly from C, producing a structure used inside the extension as an internal representation of a backtrace.
+Our intention is to get that kind of API separation between collection/stringifying merged into Backtracie.
 
 ### Benchmarks
 
-To measure the performance of these backtrace capturing methods, there's a benchmark in [`scripts/benchmark.rb`](scripts/benchmark.rb). I also added a method to the profiler, `RubyMemprofilerPprof::Collector#bt_method=`, which can be used to select a backtrace generation implementation. On my laptop, the results of the benchmark are:
+There's still a pretty significance performance overhead, but I'm working on it!
 
 ```
 $ bundle exec ruby script/benchmark.rb
-                                                         user     system      total        real
-no profiling (1)                                    19.554166   0.455122  20.009288 ( 20.131883)
-no profiling (2)                                    18.334558   0.433204  18.767762 ( 18.834532)
-with profiling (10%, CFP walking)                   20.376882   0.537873  20.914755 ( 21.503034)
-with reporting (10%, CFP walking)                   19.846640   0.498443  20.345083 ( 20.430364)
-with profiling (10%, Thread#backtrace_location)     35.042741   0.498857  35.541598 ( 35.817300)
+                                           user     system      total        real
+no profiling (1)                      15.844936   0.469273  16.314209 ( 16.337021)
+no profiling (2)                      14.966771   0.034934  15.001705 ( 15.020942)
+with profiling (1%, no flush)         15.971306   0.477258  16.448564 ( 16.471195)
+with reporting (1%, with flush)       17.402173   0.029948  17.432121 ( 17.454925)
+with profiling (10%, no flush)        23.168302   0.289576  23.457878 ( 23.487329)
+with reporting (10%, with flush)      48.194583   0.042943  48.237526 ( 48.290087)
+with profiling (100%, no flush)       24.493680   0.329478  24.823158 ( 24.856144)
+with reporting (100%, with flush)     95.083065   0.099887  95.182952 ( 95.286911)
 ```
 
-The CFP walking method adds minimal overhead to the benchmark execution (around 5% tops, depending on what you compare), whereas the `Thread#backtrace_location`-based method adds almost 75% to the execution time.
-
-Thus, the CFP-walking with `debase-ruby_core_source` headers is the default backtrace generation method in use.
-
 ## Keeping track of object liveness
+
+TODO - this is actually wrong; fix.
+
 
 In theory, what we need to do to generate profiles of retained, unfreed objects is fairly simple; when our newobj tracepoint hook is called, add the object into a hashmap (keyed by its VALUE), and when the freeobj hook is called, remove that VALUE from the hashmap. Unfortunately, it's not _quite_ that simple.
 
@@ -89,6 +83,8 @@ Secondly, at any given point, we have to treat any VALUE as if it might have bec
 Finally, it means we also have to check that VALUES are not T_NONE whilst generating the pprof report; otherwise, we would be counting that object as still live when in fact it has been freed.
 
 ## Deferred size measurement
+
+TODO - this is also outdated and wrong.
 
 As well as recording the fact that an object was allocated, we'd like to record the size of the allocation too. Ruby provides a method for this, `rb_obj_memsize_of()`, which will tell you the total size of the memory backing a given VALUE - both the size it occupies in the [Ruby heap](https://jemma.dev/blog/gc-compaction), as well as any other malloc'd memory reported for the object, e.g. as reported by a C extension thorugh it's `.dsize` callback.
 
