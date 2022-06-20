@@ -7,7 +7,13 @@
 #include <ruby.h>
 #include <ruby/debug.h>
 // Internal GC header, for rb_obj_memsize_of
-#include <internal/gc.h>
+#if defined(USE_INTERNAL_GC_H)
+#   include <internal/gc.h>
+#elif defined(USE_INTERNAL_H)
+#   include <internal.h>
+#else
+#   error "no internal.h or internal/gc.h"
+#endif
 
 #include "ruby_memprofiler_pprof.h"
 

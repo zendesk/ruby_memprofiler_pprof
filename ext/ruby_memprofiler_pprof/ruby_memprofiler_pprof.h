@@ -207,8 +207,10 @@ unsigned int mpp_mark_memoizer_add(struct mpp_mark_memoizer *memo, VALUE value);
 unsigned int mpp_mark_memoizer_delete(struct mpp_mark_memoizer *memo, VALUE value);
 // Marks all the objects in the memoizer (once)
 void mpp_mark_memoizer_mark(struct mpp_mark_memoizer *memo);
+#ifdef HAVE_RB_GC_MARK_MOVABLE
 // Handles GC compaction
 void mpp_mark_memoizer_compact(struct mpp_mark_memoizer *memo);
+#endif
 // Returns the memsize of this memoizer.
 size_t mpp_mark_memoizer_memsize(struct mpp_mark_memoizer *memo);
 

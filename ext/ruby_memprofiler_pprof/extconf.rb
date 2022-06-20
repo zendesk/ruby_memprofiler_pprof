@@ -25,7 +25,16 @@ internal_headers = proc {
     have_header("vm_core.h"),
     have_header("iseq.h", ["vm_core.h"]),
     have_header("version.h"),
-    have_func("rb_obj_memsize_of", ["internal/gc.h"]),
+    proc {
+      in_internal_gc_h = have_func("rb_obj_memsize_of", ["internal/gc.h"])
+      in_internal_h = have_func("rb_obj_memsize_of", ["internal.h"])
+      if in_internal_gc_h
+        append_cflags(["-DUSE_INTERNAL_GC_H"])
+      elsif in_internal_h
+        append_cflags(["-DUSE_INTERNAL_H"])
+      end
+      in_internal_gc_h || in_internal_h
+    }.call
   ].all?
 }
 

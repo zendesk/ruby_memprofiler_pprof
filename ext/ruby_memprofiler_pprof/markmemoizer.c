@@ -4,7 +4,9 @@
 static int memoizer_update_add(st_data_t *key, st_data_t *value, st_data_t ctxarg, int exists);
 static int memoizer_update_delete(st_data_t *key, st_data_t *value, st_data_t ctxarg, int exists);
 static int memoizer_each_mark(st_data_t key, st_data_t value, st_data_t ctxarg);
+#ifdef HAVE_RB_GC_MARK_MOVABLE
 static int memoizer_each_compact(st_data_t key, st_data_t value, st_data_t ctxarg);
+#endif
 
 struct mpp_mark_memoizer *mpp_mark_memoizer_new() {
     struct mpp_mark_memoizer *memo = mpp_xmalloc(sizeof(struct mpp_mark_memoizer));
@@ -54,6 +56,7 @@ static int memoizer_each_mark(st_data_t key, st_data_t value, st_data_t ctxarg) 
     return ST_CONTINUE;
 }
 
+#ifdef HAVE_RB_GC_MARK_MOVABLE
 void mpp_mark_memoizer_compact(struct mpp_mark_memoizer *memo) {
     st_foreach(memo->table, memoizer_each_compact, (st_data_t)memo);
 }
@@ -70,6 +73,7 @@ static int memoizer_each_compact(st_data_t key, st_data_t value, st_data_t ctxar
         return ST_CONTINUE;
     }
 }
+#endif
 
 size_t mpp_mark_memoizer_memsize(struct mpp_mark_memoizer *memo) {
     return sizeof(struct mpp_mark_memoizer) + st_memsize(memo->table);
