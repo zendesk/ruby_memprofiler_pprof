@@ -3,7 +3,9 @@
 
 static int functab_each_destroy(st_data_t key, st_data_t value, st_data_t ctxarg);
 static int functab_each_mark(st_data_t key, st_data_t value, st_data_t ctxarg);
+#ifdef HAVE_RB_GC_MARK_MOVABLE
 static int functab_each_compact(st_data_t key, st_data_t value, st_data_t ctxarg);
+#endif
 struct functab_update_add_ctx {
     struct mpp_functab *functab;
     unsigned long id;
