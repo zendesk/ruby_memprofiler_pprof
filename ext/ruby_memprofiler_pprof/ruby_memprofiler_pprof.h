@@ -37,6 +37,7 @@ void mpp_compat_init();
 #endif
 
 VALUE mpp_rb_gc_disable_no_rest();
+bool mpp_is_value_still_validish(VALUE obj);
 
 // Apparently "I just want a random number, without thinking about whether it's
 // threadsafe, without thinking about whether some other part of the process needs

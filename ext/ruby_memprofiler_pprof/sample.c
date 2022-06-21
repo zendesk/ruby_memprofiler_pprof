@@ -157,6 +157,8 @@ VALUE sample_process_protected(VALUE ctxarg) {
 }
 
 void mpp_sample_mark_value_freed(struct mpp_sample *sample) {
+#ifndef HAVE_WORKING_RB_GC_FORCE_RECYCLE
     MPP_ASSERT_MSG(!(sample->flags & MPP_SAMPLE_FLAGS_VALUE_FREED), "sample marked as freed twice");
+#endif
     sample->flags |= MPP_SAMPLE_FLAGS_VALUE_FREED;
 }

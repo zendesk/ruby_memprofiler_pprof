@@ -536,7 +536,13 @@ static VALUE collector_flush(VALUE self) {
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
         struct mpp_sample *sample = cd->heap_samples_flush_copy[i];
         if ((sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) && !(sample->flags & MPP_SAMPLE_FLAGS_VALUE_FREED)) {
-            heap_samples_sizes[i] = rb_obj_memsize_of(sample->allocated_value_weak);
+            // This defensiveness is required, because in Ruby with rb_gc_force_recycle, something might recycle
+            // our allocated_value behind our backs, and then we'll crash when we try and rb_obj_memsize_of it.
+            if (mpp_is_value_still_validish(sample->allocated_value_weak)) {
+                heap_samples_sizes[i] = rb_obj_memsize_of(sample->allocated_value_weak);
+            } else {
+                mpp_sample_mark_value_freed(sample);
+            }
         }
     }
 
