@@ -25,7 +25,7 @@ ruby_version = Gem::Version.new RUBY_VERSION
 
 # Ruby >= 3.1 has deprecated/no-opp'd rb_gc_force_recycle, which is good for us, because
 # objects freed with that method do not get the freeobj tracepoint called on them.
-if ruby_version < Gem::Version.new("3.1")
+if Gem::Requirement.new("< 3.1").satisfied_by?(ruby_version)
   $defs << "-DHAVE_WORKING_RB_GC_FORCE_RECYCLE"
 end
 
@@ -70,10 +70,39 @@ gc_opt_keys.each do |key|
   end
 end
 
+# When including the mjit header, it needs to come _before_ ruby.h otherwise
+# the C compiler will spew out multiple definition errors. So we pass a block
+# to the various have_* methods to strip that out (just the first one).
+STRIP_RUBY_INCLUDE = proc do |src|
+  src.sub(/#\s*include\s+["<]ruby\.h[">]/, '')
+end
+
 # Record where to find the mjit header
 RUBY_MJIT_HEADER = "rb_mjit_min_header-#{RUBY_VERSION}.h"
 $defs << "-DRUBY_MJIT_HEADER=\\\"#{RUBY_MJIT_HEADER}\\\""
-have_header(RUBY_MJIT_HEADER)
+have_header(RUBY_MJIT_HEADER, &STRIP_RUBY_INCLUDE) or raise "mjit header #{RUBY_MJIT_HEADER} not found"
+
+# Whether or not we have variable-sized slots in Ruby 3.1+
+checking_for checking_message("variable sized heap slots") do
+  variable_slots_src = <<~CLANG
+    #include <#{RUBY_MJIT_HEADER}>
+    #include <ruby.h>
+    #include <ruby/re.h>
+    #include "gc_private.h"
+  
+    int s = (char *)&((struct heap_page *)0)->slot_size - (char *)0;
+    int main(int argc, char **argv) {
+      return !!argv[argc];  
+    }
+  CLANG
+  if try_compile(variable_slots_src, &STRIP_RUBY_INCLUDE)
+    $defs << "-DHAVE_VARIABLE_SLOT_SIZE"
+    true
+  else
+    false
+  end
+end
+
 
 # Set our cflags up _only after_ we have run all the existence checks above; otherwise
 # stuff like -Werror can break the test programs.
@@ -115,4 +144,3 @@ dir_config('ruby')
 
 create_header
 create_makefile "ruby_memprofiler_pprof_ext"
-

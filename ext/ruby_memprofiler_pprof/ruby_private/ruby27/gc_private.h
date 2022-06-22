@@ -49,6 +49,9 @@ typedef struct RVALUE {
 #endif
 } RVALUE;
 
+#define RANY(o) ((RVALUE*)(o))
+#define STACK_CHUNK_SIZE 500
+
 typedef struct stack_chunk {
     VALUE data[STACK_CHUNK_SIZE];
     struct stack_chunk *next;
@@ -62,6 +65,67 @@ typedef struct mark_stack {
     size_t cache_size;
     size_t unused_cache_size;
 } mark_stack_t;
+
+typedef uintptr_t bits_t;
+enum {
+    BITS_SIZE = sizeof(bits_t),
+    BITS_BITLENGTH = ( BITS_SIZE * CHAR_BIT )
+};
+
+struct heap_page_header {
+    struct heap_page *page;
+};
+
+struct heap_page_body {
+    struct heap_page_header header;
+    /* char gap[];      */
+    /* RVALUE values[]; */
+};
+
+#define HEAP_PAGE_ALIGN_LOG 14
+#define CEILDIV(i, mod) (((i) + (mod) - 1)/(mod))
+enum {
+    HEAP_PAGE_ALIGN = (1UL << HEAP_PAGE_ALIGN_LOG),
+    HEAP_PAGE_ALIGN_MASK = (~(~0UL << HEAP_PAGE_ALIGN_LOG)),
+    REQUIRED_SIZE_BY_MALLOC = (sizeof(size_t) * 5),
+    HEAP_PAGE_SIZE = (HEAP_PAGE_ALIGN - REQUIRED_SIZE_BY_MALLOC),
+    HEAP_PAGE_OBJ_LIMIT = (unsigned int)((HEAP_PAGE_SIZE - sizeof(struct heap_page_header))/sizeof(struct RVALUE)),
+    HEAP_PAGE_BITMAP_LIMIT = CEILDIV(CEILDIV(HEAP_PAGE_SIZE, sizeof(struct RVALUE)), BITS_BITLENGTH),
+    HEAP_PAGE_BITMAP_SIZE = (BITS_SIZE * HEAP_PAGE_BITMAP_LIMIT),
+    HEAP_PAGE_BITMAP_PLANES = USE_RGENGC ? 4 : 1 /* RGENGC: mark, unprotected, uncollectible, marking */
+};
+
+struct heap_page {
+    short total_slots;
+    short free_slots;
+    short pinned_slots;
+    short final_slots;
+    struct {
+	unsigned int before_sweep : 1;
+	unsigned int has_remembered_objects : 1;
+	unsigned int has_uncollectible_shady_objects : 1;
+	unsigned int in_tomb : 1;
+    } flags;
+
+    struct heap_page *free_next;
+    RVALUE *start;
+    RVALUE *freelist;
+    struct list_node page_node;
+
+#if USE_RGENGC
+    bits_t wb_unprotected_bits[HEAP_PAGE_BITMAP_LIMIT];
+#endif
+    /* the following three bitmaps are cleared at the beginning of full GC */
+    bits_t mark_bits[HEAP_PAGE_BITMAP_LIMIT];
+#if USE_RGENGC
+    bits_t uncollectible_bits[HEAP_PAGE_BITMAP_LIMIT];
+    bits_t marking_bits[HEAP_PAGE_BITMAP_LIMIT];
+#endif
+
+    /* If set, the object is not movable */
+    bits_t pinned_bits[HEAP_PAGE_BITMAP_LIMIT];
+};
+
 
 typedef struct rb_heap_struct {
     RVALUE *freelist;

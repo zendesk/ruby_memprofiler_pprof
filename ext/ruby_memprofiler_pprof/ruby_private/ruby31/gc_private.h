@@ -75,6 +75,9 @@ typedef struct RVALUE {
 #endif
 } RVALUE;
 
+#define RANY(o) ((RVALUE*)(o))
+#define STACK_CHUNK_SIZE 500
+
 typedef struct stack_chunk {
     VALUE data[STACK_CHUNK_SIZE];
     struct stack_chunk *next;
@@ -101,6 +104,82 @@ typedef struct rb_heap_struct {
     size_t total_pages;      /* total page count in a heap */
     size_t total_slots;      /* total slot count (about total_pages * HEAP_PAGE_OBJ_LIMIT) */
 } rb_heap_t;
+
+typedef struct rb_size_pool_struct {
+    short slot_size;
+
+    size_t allocatable_pages;
+
+#if USE_RVARGC
+    /* Sweeping statistics */
+    size_t freed_slots;
+    size_t empty_slots;
+
+    /* Global statistics */
+    size_t force_major_gc_count;
+#endif
+
+    rb_heap_t eden_heap;
+    rb_heap_t tomb_heap;
+} rb_size_pool_t;
+
+struct heap_page_header {
+    struct heap_page *page;
+};
+
+struct heap_page_body {
+    struct heap_page_header header;
+    /* char gap[];      */
+    /* RVALUE values[]; */
+};
+
+typedef uintptr_t bits_t;
+enum {
+    BITS_SIZE = sizeof(bits_t),
+    BITS_BITLENGTH = ( BITS_SIZE * CHAR_BIT )
+};
+#define HEAP_PAGE_ALIGN_LOG 14
+#define CEILDIV(i, mod) (((i) + (mod) - 1)/(mod))
+enum {
+    HEAP_PAGE_ALIGN = (1UL << HEAP_PAGE_ALIGN_LOG),
+    HEAP_PAGE_ALIGN_MASK = (~(~0UL << HEAP_PAGE_ALIGN_LOG)),
+    HEAP_PAGE_SIZE = HEAP_PAGE_ALIGN,
+    HEAP_PAGE_OBJ_LIMIT = (unsigned int)((HEAP_PAGE_SIZE - sizeof(struct heap_page_header))/sizeof(struct RVALUE)),
+    HEAP_PAGE_BITMAP_LIMIT = CEILDIV(CEILDIV(HEAP_PAGE_SIZE, sizeof(struct RVALUE)), BITS_BITLENGTH),
+    HEAP_PAGE_BITMAP_SIZE = (BITS_SIZE * HEAP_PAGE_BITMAP_LIMIT),
+};
+#define NUM_IN_PAGE(p)   (((bits_t)(p) & HEAP_PAGE_ALIGN_MASK)/sizeof(RVALUE))
+
+struct heap_page {
+    short slot_size;
+    short total_slots;
+    short free_slots;
+    short pinned_slots;
+    short final_slots;
+    struct {
+	unsigned int before_sweep : 1;
+	unsigned int has_remembered_objects : 1;
+	unsigned int has_uncollectible_shady_objects : 1;
+	unsigned int in_tomb : 1;
+    } flags;
+
+    rb_size_pool_t *size_pool;
+
+    struct heap_page *free_next;
+    RVALUE *start;
+    RVALUE *freelist;
+    struct list_node page_node;
+
+    bits_t wb_unprotected_bits[HEAP_PAGE_BITMAP_LIMIT];
+    /* the following three bitmaps are cleared at the beginning of full GC */
+    bits_t mark_bits[HEAP_PAGE_BITMAP_LIMIT];
+    bits_t uncollectible_bits[HEAP_PAGE_BITMAP_LIMIT];
+    bits_t marking_bits[HEAP_PAGE_BITMAP_LIMIT];
+
+    /* If set, the object is not movable */
+    bits_t pinned_bits[HEAP_PAGE_BITMAP_LIMIT];
+};
+
 
 typedef struct gc_profile_record {
     unsigned int flags;
@@ -144,23 +223,6 @@ typedef struct gc_profile_record {
 #endif
 } gc_profile_record;
 
-typedef struct rb_size_pool_struct {
-    short slot_size;
-
-    size_t allocatable_pages;
-
-#if USE_RVARGC
-    /* Sweeping statistics */
-    size_t freed_slots;
-    size_t empty_slots;
-
-    /* Global statistics */
-    size_t force_major_gc_count;
-#endif
-
-    rb_heap_t eden_heap;
-    rb_heap_t tomb_heap;
-} rb_size_pool_t;
 
 typedef struct rb_objspace {
     struct {

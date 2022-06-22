@@ -14,9 +14,6 @@
 #define GC_ENABLE_INCREMENTAL_MARK USE_RINCGC
 #endif
 
-// This is the same in all versions of Ruby I looked at.
-#define STACK_CHUNK_SIZE 500
-
 // Prototype for functions that are exposed with external linkage, but not in
 // the public headers.
 size_t rb_obj_memsize_of(VALUE obj);
@@ -39,11 +36,56 @@ size_t mpp_rb_obj_memsize_of(VALUE obj) {
     return rb_obj_memsize_of(obj);
 }
 
+// An implementation of is_pointer_to_heap, which is static in gc.c
+static int mpp_is_pointer_to_heap(rb_objspace_t *objspace, void *ptr) {
+    register RVALUE *p = RANY(ptr);
+    register struct heap_page *page;
+    register size_t hi, lo, mid;
+
+    if (p < objspace->heap_pages.range[0] || p > objspace->heap_pages.range[1]) return FALSE;
+    if ((VALUE)p % sizeof(RVALUE) != 0) return FALSE;
+    /* check if p looks like a pointer using bsearch*/
+    lo = 0;
+    hi = objspace->heap_pages.allocated_pages;
+    while (lo < hi) {
+        mid = (lo + hi) / 2;
+        page = objspace->heap_pages.sorted[mid];
+        if (page->start <= p) {
+#ifdef HAVE_VARIABLE_SLOT_SIZE
+                // >= Ruby 3.1
+                if ((uintptr_t)p < ((uintptr_t)page->start + (page->total_slots * page->slot_size))) {
+#else
+                // <= Ruby 3.0
+                if (p < page->start + page->total_slots) {
+#endif
+                    if (page->flags.in_tomb) {
+                        return FALSE;
+                    }
+                    else {
+#ifdef HAVE_VARIABLE_SLOT_SIZE
+                        if ((NUM_IN_PAGE(p) * sizeof(RVALUE)) % page->slot_size != 0) return FALSE;
+#endif
+                        return TRUE;
+                    }
+            }
+            lo = mid + 1;
+        }
+        else {
+            hi = mid;
+        }
+    }
+    return FALSE;
+}
+
 // Answers the question, would rb_obj_memsize_of crash on this object?
 bool mpp_is_value_still_validish(VALUE obj) {
+    if (!mpp_is_pointer_to_heap(GET_VM()->objspace, (void *)obj)) {
+        return false;
+    }
     int type = RB_BUILTIN_TYPE(obj);
     // do NOT return true for T_NODE; rb_obj_memsize_of() can't handle it.
     switch (type) {
+    case T_OBJECT:
     case T_MODULE:
     case T_CLASS:
     case T_ICLASS:
