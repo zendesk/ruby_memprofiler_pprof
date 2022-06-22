@@ -16,6 +16,5 @@ Gem::Specification.new do |spec|
   spec.executables   = %w[ruby_memprofiler_pprof_profile]
 
   spec.required_ruby_version = ">= 2.6.8"
-  spec.add_dependency 'debase-ruby_core_source', '>= 0.10.14'
   spec.add_dependency 'backtracie', '= 0.3.1.dev'
 end

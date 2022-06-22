@@ -7,4 +7,4 @@ mkmf.log
 *.o
 .vscode/
 .gdb_history
-
+extconf.h

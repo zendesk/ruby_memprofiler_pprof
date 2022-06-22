@@ -18,34 +18,62 @@ has_zlib_headers = have_header("zlib.h")
 has_zlib_lib = have_library("z")
 raise "Zlib headers & library are required!" unless has_zlib_headers && has_zlib_lib
 
-# Peek into internal Ruby headers
-require 'debase/ruby_core_source'
-internal_headers = proc {
-  [
-    have_header("vm_core.h"),
-    have_header("iseq.h", ["vm_core.h"]),
-    have_header("version.h"),
-    proc {
-      in_internal_gc_h = have_func("rb_obj_memsize_of", ["internal/gc.h"])
-      in_internal_h = have_func("rb_obj_memsize_of", ["internal.h"])
-      if in_internal_gc_h
-        append_cflags(["-DUSE_INTERNAL_GC_H"])
-      elsif in_internal_h
-        append_cflags(["-DUSE_INTERNAL_H"])
-      end
-      in_internal_gc_h || in_internal_h
-    }.call
-  ].all?
-}
-
 # Need to actually link pthreads properly
 have_library("pthread") or raise "missing pthread library"
 
+ruby_version = Gem::Version.new RUBY_VERSION
+
 # Ruby >= 3.1 has deprecated/no-opp'd rb_gc_force_recycle, which is good for us, because
 # objects freed with that method do not get the freeobj tracepoint called on them.
-if RUBY_VERSION < "3.1"
-  append_cflags(['-DHAVE_WORKING_RB_GC_FORCE_RECYCLE'])
+if ruby_version < Gem::Version.new("3.1")
+  $defs << "-DHAVE_WORKING_RB_GC_FORCE_RECYCLE"
 end
+
+if Gem::Requirement.new("~> 2.6.0").satisfied_by?(ruby_version)
+  $VPATH << "$(srcdir)/ruby_private/ruby26"
+  $INCFLAGS << " -I#{File.join($srcdir, "ruby_private/ruby26")}"
+elsif Gem::Requirement.new("~> 2.7.0").satisfied_by?(ruby_version)
+  $VPATH << "$(srcdir)/ruby_private/ruby27"
+  $INCFLAGS << " -I#{File.join($srcdir, "ruby_private/ruby27")}"
+elsif Gem::Requirement.new("~> 3.0.0").satisfied_by?(ruby_version)
+  $VPATH << "$(srcdir)/ruby_private/ruby30"
+  $INCFLAGS << " -I#{File.join($srcdir, "ruby_private/ruby30")}"
+elsif Gem::Requirement.new("~> 3.1.0").satisfied_by?(ruby_version)
+  $VPATH << "$(srcdir)/ruby_private/ruby31"
+  $INCFLAGS << " -I#{File.join($srcdir, "ruby_private/ruby31")}"
+else
+  raise "Not compatible with Ruby #{ruby_version}"
+end
+
+# Ask the ruby interpreter at runtime if these features are enabled or not
+# The values detected this way will be used if they are not present in
+# the mjit header.
+gc_opt_keys = %w(
+  GC_DEBUG
+  USE_RGENGC
+  RGENGC_DEBUG
+  RGENGC_CHECK_MODE
+  RGENGC_PROFILE
+  RGENGC_ESTIMATE_OLDMALLOC
+  GC_PROFILE_MORE_DETAIL
+  GC_ENABLE_LAZY_SWEEP
+  CALC_EXACT_MALLOC_SIZE
+  MALLOC_ALLOCATED_SIZE
+  MALLOC_ALLOCATED_SIZE_CHECK
+  GC_PROFILE_DETAIL_MEMORY
+)
+gc_opt_keys.each do |key|
+  if GC::OPTS.include?(key)
+    $defs << "-D#{key}=1"
+  else
+    $defs << "-D#{key}=0"
+  end
+end
+
+# Record where to find the mjit header
+RUBY_MJIT_HEADER = "rb_mjit_min_header-#{RUBY_VERSION}.h"
+$defs << "-DRUBY_MJIT_HEADER=\\\"#{RUBY_MJIT_HEADER}\\\""
+have_header(RUBY_MJIT_HEADER)
 
 # Set our cflags up _only after_ we have run all the existence checks above; otherwise
 # stuff like -Werror can break the test programs.
@@ -84,12 +112,7 @@ require 'backtracie/mkmf_support'
 compile_with_backtracie!
 
 dir_config('ruby')
-extname = "ruby_memprofiler_pprof/ruby_memprofiler_pprof_ext"
-unless Debase::RubyCoreSource.create_makefile_with_core(internal_headers, extname)
-  STDERR.print("Makefile creation failed\n")
-  STDERR.print("*************************************************************\n\n")
-  STDERR.print("  NOTE: If your headers were not found, try passing\n")
-  STDERR.print("        --with-ruby-include=PATH_TO_HEADERS      \n\n")
-  STDERR.print("*************************************************************\n\n")
-  exit(1)
-end
+
+create_header
+create_makefile "ruby_memprofiler_pprof_ext"
+

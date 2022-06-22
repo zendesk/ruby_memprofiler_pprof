@@ -1,6 +1,8 @@
 #ifndef __RUBY_MEMPROFILER_PPROF_H
 #define __RUBY_MEMPROFILER_PPROF_H
 
+#include "extconf.h"
+
 #include <pthread.h>
 #include <stdint.h>
 #include <ruby.h>
@@ -18,9 +20,6 @@
 
 
 // ======== COMPAT DECLARATIONS ========
-
-// Look anything up that needs to be done at runtime.
-void mpp_compat_init();
 
 // For handling differences in ruby versions
 #ifndef HAVE_RB_GC_MARK_MOVABLE

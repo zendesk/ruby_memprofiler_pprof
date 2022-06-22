@@ -1,3 +1,5 @@
+#include "ruby_private.h"
+
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -6,14 +8,6 @@
 
 #include <ruby.h>
 #include <ruby/debug.h>
-// Internal GC header, for rb_obj_memsize_of
-#if defined(USE_INTERNAL_GC_H)
-#   include <internal/gc.h>
-#elif defined(USE_INTERNAL_H)
-#   include <internal.h>
-#else
-#   error "no internal.h or internal/gc.h"
-#endif
 
 #include "ruby_memprofiler_pprof.h"
 

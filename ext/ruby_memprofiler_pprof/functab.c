@@ -103,7 +103,7 @@ static int functab_each_mark(st_data_t key, st_data_t value, st_data_t ctxarg) {
     return ST_CONTINUE;
 }
 
-#ifdef RB_GHAVE_RB_GC_MARK_MOVABLE
+#ifdef HAVE_RB_GC_MARK_MOVABLE
 static int functab_each_compact(st_data_t key, st_data_t value, st_data_t ctxarg) {
     struct mpp_functab_entry *entry = (struct mpp_functab_entry *)value;
     entry->cme_or_iseq = rb_gc_location(entry->cme_or_iseq);
