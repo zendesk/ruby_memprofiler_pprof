@@ -8,13 +8,15 @@ module MemprofilerPprof
     extend Forwardable
 
     def initialize(
-      collector, pattern: 'tmp/profiles/mem-%{pid}-%{isotime}.pprof', interval: 30, logger: nil, priority: nil
+      collector, pattern: 'tmp/profiles/mem-%{pid}-%{isotime}.pprof', interval: 30, logger: nil, priority: nil,
+      thread_yield_interval: nil
     )
       @logger = logger
       @pattern = pattern
       @profile_counter = 0
       @block_flusher = BlockFlusher.new(
-        collector, interval: interval, logger: logger, priority: priority, on_flush: method(:on_flush)
+        collector, interval: interval, logger: logger, priority: priority, thread_yield_interval: thread_yield_interval,
+        on_flush: method(:on_flush)
       )
     end
 

@@ -42,7 +42,8 @@ describe MemprofilerPprof::FileFlusher do
     flusher = MemprofilerPprof::FileFlusher.new(c,
       pattern: "#{@dir}/%{index}.pprof",
       interval: 2,
-      logger: Logger.new(STDERR)
+      logger: Logger.new(STDERR),
+      thread_yield_interval: 50_000_000_000,
     )
 
     flusher.run do

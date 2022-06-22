@@ -20,6 +20,7 @@ raise "Zlib headers & library are required!" unless has_zlib_headers && has_zlib
 
 # Need to actually link pthreads properly
 have_library("pthread") or raise "missing pthread library"
+have_func('clock_gettime', ['time.h']) or raise "missing clock_gettime"
 
 ruby_version = Gem::Version.new RUBY_VERSION
 

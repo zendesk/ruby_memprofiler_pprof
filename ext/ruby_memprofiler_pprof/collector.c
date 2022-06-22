@@ -78,7 +78,18 @@ static void collector_tphook_freeobj(VALUE tpval, void *data);
 static VALUE collector_start(VALUE self);
 static VALUE collector_stop(VALUE self);
 static VALUE collector_is_running(VALUE self);
-static VALUE collector_flush(VALUE self);
+static VALUE collector_flush(int argc, VALUE *argv, VALUE self);
+struct thread_yield_state {
+    struct timespec last_yield_time;
+    unsigned long yield_interval_ns;
+    unsigned long iteration_counter;
+    unsigned long iteration_check_interval;
+};
+static void check_thread_yield(struct thread_yield_state *st);
+struct flush_process_samples_ctx {
+    struct collector_cdata *cd;
+    struct thread_yield_state *th_yield_state;
+};
 static VALUE flush_process_samples(VALUE ctxarg);
 struct flush_prepresult_ctx {
     struct collector_cdata *cd;
@@ -129,7 +140,7 @@ void mpp_setup_collector_class() {
     rb_define_method(cCollector, "running?", collector_is_running, 0);
     rb_define_method(cCollector, "start!", collector_start, 0);
     rb_define_method(cCollector, "stop!", collector_stop, 0);
-    rb_define_method(cCollector, "flush", collector_flush, 0);
+    rb_define_method(cCollector, "flush", collector_flush, -1);
     rb_define_method(cCollector, "profile", collector_profile, 0);
     rb_define_method(cCollector, "live_heap_samples_count", collector_live_heap_samples_count, 0);
 }
@@ -482,8 +493,45 @@ static VALUE collector_is_running(VALUE self) {
     return cd->is_tracing ? Qtrue : Qfalse;
 }
 
-static VALUE collector_flush(VALUE self) {
+static void check_thread_yield(struct thread_yield_state *st) {
+    if (st->yield_interval_ns == 0) return;
+
+    st->iteration_counter++;
+    if (st->iteration_counter % st->iteration_check_interval != 0) return;
+
+    struct timespec current_time;
+    clock_gettime(CLOCK_MONOTONIC, &current_time);
+    // Don't care about overflow; the absolute worst thing that might happen
+    // is that we do or do not call rb_thread_schedule an extra time.
+    unsigned long delta = (current_time.tv_sec - st->last_yield_time.tv_sec) * 1000000000 +
+            (current_time.tv_nsec - st->last_yield_time.tv_nsec);
+    if (delta < st->yield_interval_ns) return;
+
+
+    rb_thread_schedule();
+    clock_gettime(CLOCK_MONOTONIC, &st->last_yield_time);
+}
+
+static VALUE collector_flush(int argc, VALUE *argv, VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
+
+    // kwarg handling
+    VALUE kwargs_hash = Qnil;
+    rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, argc, argv, "00:", &kwargs_hash);
+    VALUE kwarg_values[1];
+    ID kwarg_ids[1];
+    kwarg_ids[0] = rb_intern("thread_yield_interval");
+    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 1, kwarg_values);
+
+    struct thread_yield_state th_yield_state;
+    th_yield_state.yield_interval_ns = 0;
+    if (kwarg_values[0] != Qundef && RTEST(kwarg_values[0])) {
+        th_yield_state.yield_interval_ns = NUM2ULONG(kwarg_values[0]);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &th_yield_state.last_yield_time);
+    th_yield_state.iteration_counter = 0;
+    th_yield_state.iteration_check_interval = 50;
+
 
     // Normally not a fan pointlessly declaring all vars at the top of a function, but in this
     // case we need it, to ensure they're all appropriately initialized for the out: block
@@ -516,16 +564,24 @@ static VALUE collector_flush(VALUE self) {
     // have to worry about what happens if something is deleted from the map while we're iterating it.
     st_values(cd->heap_samples, (st_data_t *)cd->heap_samples_flush_copy, cd->heap_samples_flush_copy_count);
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
+        check_thread_yield(&th_yield_state);
+
         mpp_sample_refcount_inc(cd->heap_samples_flush_copy[i]);
     }
 
     // Process them into "processed" samples, if needed.
-    rb_protect(flush_process_samples, (VALUE)cd, &jump_tag);
+    struct flush_process_samples_ctx flush_ctx = {
+            .cd = cd,
+            .th_yield_state = &th_yield_state,
+    };
+    rb_protect(flush_process_samples, (VALUE)&flush_ctx, &jump_tag);
     if (jump_tag) goto out;
 
     // Capture their size, if possible.
     heap_samples_sizes = mpp_xmalloc(cd->heap_samples_flush_copy_count * sizeof(size_t));
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
+        check_thread_yield(&th_yield_state);
+
         struct mpp_sample *sample = cd->heap_samples_flush_copy[i];
         if ((sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) && !(sample->flags & MPP_SAMPLE_FLAGS_VALUE_FREED)) {
             // This defensiveness is required, because in Ruby with rb_gc_force_recycle, something might recycle
@@ -547,6 +603,8 @@ static VALUE collector_flush(VALUE self) {
     // Add each sample from our internal copy.
     size_t actual_sample_count = 0;
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
+        check_thread_yield(&th_yield_state);
+
         struct mpp_sample *sample = cd->heap_samples_flush_copy[i];
         if ((sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) && !(sample->flags & MPP_SAMPLE_FLAGS_VALUE_FREED)) {
             r = mpp_pprof_serctx_add_sample(serctx, sample, heap_samples_sizes[i], errbuf, sizeof(errbuf));
@@ -588,6 +646,7 @@ static VALUE collector_flush(VALUE self) {
     if (serctx) mpp_pprof_serctx_destroy(serctx);
     if (cd->heap_samples_flush_copy) {
         for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
+            check_thread_yield(&th_yield_state);
             mpp_sample_refcount_dec(cd->heap_samples_flush_copy[i], cd->function_table, cd->mark_memo);
         }
         mpp_free(cd->heap_samples_flush_copy);
@@ -611,8 +670,11 @@ static VALUE collector_flush(VALUE self) {
 }
 
 static VALUE flush_process_samples(VALUE ctxarg) {
-    struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
+    struct flush_process_samples_ctx *ctx = (struct flush_process_samples_ctx *)ctxarg;
+    struct collector_cdata *cd = ctx->cd;
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
+        check_thread_yield(ctx->th_yield_state);
+
         struct mpp_sample *sample = cd->heap_samples_flush_copy[i];
         if (!(sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) && !(sample->flags & MPP_SAMPLE_FLAGS_VALUE_FREED)) {
             mpp_sample_process(sample, cd->function_table, cd->mark_memo);

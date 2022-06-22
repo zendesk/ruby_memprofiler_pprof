@@ -4,7 +4,7 @@ module MemprofilerPprof
   class BlockFlusher
     attr_reader :collector
 
-    def initialize(collector, interval: 30, logger: nil, on_flush: nil, priority: nil)
+    def initialize(collector, interval: 30, logger: nil, on_flush: nil, priority: nil, thread_yield_interval: nil)
       @collector = collector
       @interval = interval
       @logger = logger
@@ -14,6 +14,7 @@ module MemprofilerPprof
       @status_cvar = ConditionVariable.new
       @status = :not_started
       @priority = priority
+      @thread_yield_interval = thread_yield_interval
     end
 
     def start!
@@ -81,7 +82,7 @@ module MemprofilerPprof
 
         t1 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         begin
-          profile_data = @collector.flush
+          profile_data = @collector.flush(thread_yield_interval: @thread_yield_interval)
           @on_flush&.call(profile_data)
         rescue => e
           @logger&.error("BaseFlusher: failed to flush profiling data: #{e.inspect}")
