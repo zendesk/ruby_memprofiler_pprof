@@ -1,5 +1,3 @@
-#include "ruby_private.h"
-
 #include <errno.h>
 #include <ruby.h>
 #include <pthread.h>
@@ -7,38 +5,6 @@
 #include <stdlib.h>
 
 #include "ruby_memprofiler_pprof.h"
-
-VALUE mpp_rb_gc_disable_no_rest() {
-    int old_dont_gc = GET_VM()->objspace->flags.dont_gc;
-    GET_VM()->objspace->flags.dont_gc = 1;
-    return old_dont_gc ? Qtrue : Qfalse;
-}
-
-bool mpp_is_value_still_validish(VALUE obj) {
-    int type = RB_BUILTIN_TYPE(obj);
-    // do NOT return true for T_NODE; rb_obj_memsize_of() can't handle it.
-    switch (type) {
-    case T_MODULE:
-    case T_CLASS:
-    case T_ICLASS:
-    case T_STRING:
-    case T_ARRAY:
-    case T_HASH:
-    case T_REGEXP:
-    case T_DATA:
-    case T_MATCH:
-    case T_FILE:
-    case T_RATIONAL:
-    case T_COMPLEX:
-    case T_IMEMO:
-    case T_FLOAT:
-    case T_SYMBOL:
-    case T_BIGNUM:
-    case T_STRUCT:
-        return true;
-    }
-    return false;
-}
 
 #if defined(HAVE_ARC4RANDOM)
 uint32_t mpp_rand() {

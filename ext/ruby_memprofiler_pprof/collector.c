@@ -1,5 +1,3 @@
-#include "ruby_private.h"
-
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -533,7 +531,7 @@ static VALUE collector_flush(VALUE self) {
             // This defensiveness is required, because in Ruby with rb_gc_force_recycle, something might recycle
             // our allocated_value behind our backs, and then we'll crash when we try and rb_obj_memsize_of it.
             if (mpp_is_value_still_validish(sample->allocated_value_weak)) {
-                heap_samples_sizes[i] = rb_obj_memsize_of(sample->allocated_value_weak);
+                heap_samples_sizes[i] = mpp_rb_obj_memsize_of(sample->allocated_value_weak);
             } else {
                 mpp_sample_mark_value_freed(sample);
             }

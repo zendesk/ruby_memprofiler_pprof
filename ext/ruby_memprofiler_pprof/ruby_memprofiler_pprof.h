@@ -35,9 +35,6 @@
 #define rb_ext_ractor_safe(x) do {} while (0)
 #endif
 
-VALUE mpp_rb_gc_disable_no_rest();
-bool mpp_is_value_still_validish(VALUE obj);
-
 // Apparently "I just want a random number, without thinking about whether it's
 // threadsafe, without thinking about whether some other part of the process needs
 // the global seed to be set to some deterministic value, and without calling into
@@ -86,6 +83,17 @@ void mpp_assert_fail(const char *msg, const char *assertion, const char *file, c
 // The implementation here does not depend on holding the GVL.
 // Will automatically add a trailing newline.
 void mpp_log_debug(const char *pattern, ...);
+
+// ======== RUBY HACKS DECLARATIONS ========
+
+// An implementation of rb_gc_disable_no_rest; disables the GC without itself triggering
+// the finalisation of the current sweep phase of the GC.
+VALUE mpp_rb_gc_disable_no_rest();
+// An implementation of rb_obj_memsize_of; tells us how big an object is.
+VALUE mpp_rb_obj_memsize_of(VALUE obj);
+// Tells us whether the given VALUE is valid enough still for rb_obj_memsize_of to
+// work on it.
+bool mpp_is_value_still_validish(VALUE obj);
 
 // ======== STRTAB DECLARATIONS ========
 
