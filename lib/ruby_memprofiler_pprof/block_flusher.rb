@@ -4,7 +4,7 @@ module MemprofilerPprof
   class BlockFlusher
     attr_reader :collector
 
-    def initialize(collector, interval: 30, logger: nil, on_flush: nil)
+    def initialize(collector, interval: 30, logger: nil, on_flush: nil, priority: nil)
       @collector = collector
       @interval = interval
       @logger = logger
@@ -13,12 +13,17 @@ module MemprofilerPprof
       @status_mutex = Mutex.new
       @status_cvar = ConditionVariable.new
       @status = :not_started
+      @priority = priority
     end
 
     def start!
       stop!
       @status = :running
+      @is_paused = false
       @thread = Thread.new { flusher_thread }
+      if !@priority.nil?
+        @thread.priority = @priority
+      end
       @atfork_handler = MemprofilerPprof::Atfork.at_fork(:child, &method(:at_fork_in_child))
     end
 
@@ -42,6 +47,21 @@ module MemprofilerPprof
       end
     end
 
+    def pause
+      @status_mutex.synchronize do
+        @is_paused = true
+        @status_cvar.broadcast
+      end
+    end
+
+
+    def unpause
+      @status_mutex.synchronize do
+        @is_paused = false
+        @status_cvar.broadcast
+      end
+    end
+
     private
 
     def flusher_thread
@@ -50,14 +70,12 @@ module MemprofilerPprof
         now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         wait_until = now + [0, @interval - prev_flush_duration].max
 
-        catch :continue do
-          @status_mutex.synchronize do
-            loop do
-              return if @status != :running
-              now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-              throw :continue if now >= wait_until
-              @status_cvar.wait(@status_mutex, wait_until - now)
-            end
+        @status_mutex.synchronize do
+          loop do
+            return if @status != :running
+            now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            break if now >= wait_until && !@is_paused
+            @status_cvar.wait(@status_mutex, wait_until - now)
           end
         end
 

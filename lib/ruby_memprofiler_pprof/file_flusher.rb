@@ -7,11 +7,15 @@ module MemprofilerPprof
   class FileFlusher
     extend Forwardable
 
-    def initialize(collector, pattern: 'tmp/profiles/mem-%{pid}-%{isotime}.pprof', interval: 30, logger: nil)
+    def initialize(
+      collector, pattern: 'tmp/profiles/mem-%{pid}-%{isotime}.pprof', interval: 30, logger: nil, priority: nil
+    )
       @logger = logger
       @pattern = pattern
       @profile_counter = 0
-      @block_flusher = BlockFlusher.new(collector, interval: interval, logger: logger, on_flush: method(:on_flush))
+      @block_flusher = BlockFlusher.new(
+        collector, interval: interval, logger: logger, priority: priority, on_flush: method(:on_flush)
+      )
     end
 
     def_delegators :@block_flusher, :start!, :stop!, :run
