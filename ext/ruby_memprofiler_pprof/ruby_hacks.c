@@ -107,3 +107,12 @@ bool mpp_is_value_still_validish(VALUE obj) {
     }
     return false;
 }
+
+// Peeks into internal GVL structures to spy if someone else is waiting for the GVL; we can
+// then be polite and yield it for them.
+bool mpp_is_someone_else_waiting_for_gvl() {
+    pthread_mutex_lock(&GET_VM()->gvl.lock);
+    bool someone_waiting = list_empty(&GET_VM()->gvl.waitq);
+    pthread_mutex_unlock(&GET_VM()->gvl.lock);
+    return someone_waiting;
+}

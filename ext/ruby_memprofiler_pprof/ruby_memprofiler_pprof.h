@@ -94,6 +94,8 @@ VALUE mpp_rb_obj_memsize_of(VALUE obj);
 // Tells us whether the given VALUE is valid enough still for rb_obj_memsize_of to
 // work on it.
 bool mpp_is_value_still_validish(VALUE obj);
+// Is some other thread blocked waiting for the GVL?
+bool mpp_is_someone_else_waiting_for_gvl();
 
 // ======== STRTAB DECLARATIONS ========
 

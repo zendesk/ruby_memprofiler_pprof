@@ -493,23 +493,26 @@ static VALUE collector_is_running(VALUE self) {
     return cd->is_tracing ? Qtrue : Qfalse;
 }
 
-static void check_thread_yield(struct thread_yield_state *st) {
-    if (st->yield_interval_ns == 0) return;
-
-    st->iteration_counter++;
-    if (st->iteration_counter % st->iteration_check_interval != 0) return;
-
+static bool is_thread_yield_time(struct thread_yield_state *st) {
     struct timespec current_time;
     clock_gettime(CLOCK_MONOTONIC, &current_time);
     // Don't care about overflow; the absolute worst thing that might happen
     // is that we do or do not call rb_thread_schedule an extra time.
     unsigned long delta = (current_time.tv_sec - st->last_yield_time.tv_sec) * 1000000000 +
             (current_time.tv_nsec - st->last_yield_time.tv_nsec);
-    if (delta < st->yield_interval_ns) return;
+    return delta >= st->yield_interval_ns;
+}
 
+static void check_thread_yield(struct thread_yield_state *st) {
+    if (st->yield_interval_ns == 0) return;
 
-    rb_thread_schedule();
-    clock_gettime(CLOCK_MONOTONIC, &st->last_yield_time);
+    st->iteration_counter++;
+    if (st->iteration_counter % st->iteration_check_interval != 0) return;
+
+    if (mpp_is_someone_else_waiting_for_gvl() || is_thread_yield_time(st)) {
+        rb_thread_schedule();
+        clock_gettime(CLOCK_MONOTONIC, &st->last_yield_time);
+    }
 }
 
 static VALUE collector_flush(int argc, VALUE *argv, VALUE self) {
@@ -530,7 +533,7 @@ static VALUE collector_flush(int argc, VALUE *argv, VALUE self) {
     }
     clock_gettime(CLOCK_MONOTONIC, &th_yield_state.last_yield_time);
     th_yield_state.iteration_counter = 0;
-    th_yield_state.iteration_check_interval = 50;
+    th_yield_state.iteration_check_interval = 20;
 
 
     // Normally not a fan pointlessly declaring all vars at the top of a function, but in this
