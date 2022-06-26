@@ -13,3 +13,5 @@ gem 'pry', '~> 0.14'
 gem 'timecop', '~> 0.9'
 gem 'sinatra', '~> 2'
 gem 'thwait', '~> 0.2'
+
+gem 'backtracie', path: '../backtracie'
