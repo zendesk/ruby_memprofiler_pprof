@@ -138,8 +138,8 @@ $VPATH << "$(srcdir)/vendor/upb/upb"
 $VPATH << "$(srcdir)/vendor/upb/third_party/utf8_range"
 $INCFLAGS << " -I#{File.join($srcdir, "vendor/upb")}"
 
-require 'backtracie/mkmf_support'
-compile_with_backtracie!
+# require 'backtracie/mkmf_support'
+# compile_with_backtracie!
 
 dir_config('ruby')
 

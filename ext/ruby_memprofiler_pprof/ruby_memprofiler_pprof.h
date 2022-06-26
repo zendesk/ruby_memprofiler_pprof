@@ -4,9 +4,10 @@
 #include "extconf.h"
 
 #include <pthread.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <ruby.h>
-#include <backtracie.h>
 
 // UPB header files trip up a BUNCH of -Wshorten-64-to-32
 // Also ignore -Wpragmas so that if -Wshorten-64-to-32 isn't present
@@ -96,6 +97,19 @@ VALUE mpp_rb_obj_memsize_of(VALUE obj);
 bool mpp_is_value_still_validish(VALUE obj);
 // Is some other thread blocked waiting for the GVL?
 bool mpp_is_someone_else_waiting_for_gvl();
+
+// ======== STRBUILDER DECLARATIONS ========
+struct mpp_strbuilder {
+    char *original_buf;
+    char *curr_ptr;
+    size_t original_bufsize;
+    size_t attempted_size;
+};
+
+void mpp_strbuilder_appendf(struct mpp_strbuilder *str, const char *fmt, ...);
+void mpp_strbuilder_append_value(struct mpp_strbuilder *str, VALUE val);
+VALUE mpp_strbuilder_to_value(struct mpp_strbuilder *str);
+void mpp_strbuilder_init(struct mpp_strbuilder *str, char *buf, size_t bufsize);
 
 // ======== STRTAB DECLARATIONS ========
 
@@ -196,6 +210,16 @@ void mpp_strtab_index_destroy(struct mpp_strtab_index *ix);
 int64_t mpp_strtab_index_of(struct mpp_strtab_index *ix, const char *interned_ptr);
 typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size_t interned_str_len, void *ctx);
 void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *ctx);
+
+// ======== BACKTRACE DECLARATIONS ========
+struct mpp_backtrace_frame {
+    bool frame_valid;
+    struct mpp_strbuilder qualified_method_name;
+    struct mpp_strbuilder file_name;
+    int line_number;
+};
+void mpp_setup_backtrace();
+bool mpp_capture_backtrace_frame(VALUE thread, int frame, struct mpp_backtrace_frame *frameout);
 
 // ======== MARKMEMOIZER DECLARATIONS ========
 

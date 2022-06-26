@@ -4,28 +4,38 @@
 #include <string.h>
 #include <stdarg.h>
 
-struct mpp_string_builder {
-    char *buf;
-    size_t bufsize;
-    char *curr_ptr;
+static VALUE main_object;
+
+struct internal_frame_data {
+    bool valid : 1;
+    bool cfunc : 1;
+    rb_callable_method_entry_t *cme;
+    rb_iseq_t *iseq;
+    VALUE self;
 };
 
-void mpp_string_builder_appendf(struct mpp_string_builder *builder, const char *fmt, ...) {
-    va_list fmtargs;
-    va_start(fmtargs, fmt);
-    size_t remaining_bufsize = builder->bufsize - (builder->curr_ptr - builder->buf);
-    size_t chars_would_write = vsnprintf(builder->curr_ptr, remaining_bufsize, fmt, fmtargs);
-    if (chars_would_write >= remaining_bufsize) {
-        // This will cause remaining_bufsize to be zero on subsequent invocations, resulting in nothing
-        // further being written.
-        builder->curr_ptr = builder->buf + builder->bufsize;
-    } else {
-        builder->curr_ptr = builder->curr_ptr + chars_would_write;
-    }
-    va_end(fmtargs);
+static void qualified_method_name_for_frame(
+    struct internal_frame_data data, struct mpp_strbuilder *strou
+);
+static void mod_to_s(VALUE klass, struct mpp_strbuilder *strout);
+static void mod_to_s_singleton(VALUE klass, struct mpp_strbuilder *strout);
+static void mod_to_s_anon(VALUE klass, struct mpp_strbuilder *strout);
+static void mod_to_s_refinement(VALUE refinement_module, struct mpp_strbuilder *strout);
+static void method_qualifier(struct internal_frame_data data, struct mpp_strbuilder *strout);
+static void method_name(struct internal_frame_data data, struct mpp_strbuilder *strout);
+static bool iseq_is_block_or_eval(rb_iseq_t *iseq);
+static void iseq_path(rb_iseq_t *iseq, struct mpp_strbuilder *strout);
+static int iseq_calc_lineno(const rb_iseq_t *iseq, const VALUE *pc);
+
+void mpp_setup_backtrace() {
+    main_object = rb_funcall(
+        rb_const_get(rb_cObject, rb_intern("TOPLEVEL_BINDING")),
+        rb_intern("eval"),
+        1, rb_str_new2("self")
+    );
 }
 
-static void capture_ruby_backtrace_frame(VALUE thread, int frame) {
+bool mpp_capture_backtrace_frame(VALUE thread, int frame, struct mpp_backtrace_frame *frameout) {
     rb_thread_t *thread_data = (rb_thread_t *) DATA_PTR(thread);
     rb_execution_context_t *ec = thread_data->ec;
 
@@ -33,87 +43,291 @@ static void capture_ruby_backtrace_frame(VALUE thread, int frame) {
     // (I couldn't decide if this was supposed to be the "top" or "bottom" of the callstack; but lower
     // frame argument --> more recently called function.
     const rb_control_frame_t *cfp = ec->cfp + frame;
-    MPP_ASSERT_MSG(
-        RUBY_VM_VALID_CONTROL_FRAME_P(cfp, RUBY_VM_END_CONTROL_FRAME(ec)),
-        "Computed control frame was not valid!"
-    );
+    if (!RUBY_VM_VALID_CONTROL_FRAME_P(cfp, RUBY_VM_END_CONTROL_FRAME(ec))) {
+        // Means we're past the end of the stack. Return false, to have our caller
+        // stop fetching frames.
+        return false;
+    }
 
     const rb_callable_method_entry_t *cme = rb_vm_frame_method_entry(cfp);
+    struct internal_frame_data frame_data = {
+        .valid = false,
+        .cfunc = false,
+        .cme = cme,
+        .iseq = cfp->iseq,
+        .self = cfp->self,
+    };
 
     if (cfp->iseq && !cfp->pc) {
         // Apparently means that this frame shouldn't appear in a backtrace
     } else if (VM_FRAME_RUBYFRAME_P(cfp)) {
         // A frame executing Ruby code
+        frame_data.valid = true;
     } else if (cme && cme->def->type == VM_METHOD_TYPE_CFUNC) {
         // A frame executing C code
+        frame_data.valid = true;
+        frame_data.cfunc = true;
     } else {
         // Also shouldn't appear in backtraces.
     }
-}
 
-static VALUE bt_defined_class(rb_callable_method_entry_t *cme) {
-    if (!RTEST(cme)) {
-        return Qnil;
+    if (!frame_data.valid) {
+        frameout->frame_valid = false;
+        return true; // There may be more frames.
     }
-    return cme->defined_class;
+
+    // Fill in the method name
+    qualified_method_name_for_frame(frame_data, &frameout->qualified_method_name);
+
+    if (frame_data.cfunc) {
+        // The built-in ruby stuff uses the next-highest Ruby frame as the filename for
+        // cfuncs in backtraces. That's not all that useful, and also it's bit tricky to
+        // keep track of that in one pass through the stack without any kind of dynamic
+        // allocation. Just put some generic rubbish in the filename.
+        mpp_strbuilder_appendf(&frameout->file_name, "(cfunc)");
+        frameout->line_number = 0;
+    } else {
+        iseq_path(frame_data.iseq, &frameout->file_name);
+        frameout->line_number = iseq_calc_lineno(frame_data.iseq, cfp->pc);
+    }
+    return true;
 }
 
-struct mpp_bt_frame_data {
-    rb_callable_method_entry_t *cme;
-};
 
-static inline VALUE cme_defined_class(rb_callable_method_entry_t *cme) {
-    return RTEST(cme) ? cme->defined_class : Qnil;
+static void qualified_method_name_for_frame(
+    struct internal_frame_data data, struct mpp_strbuilder *strout
+) {
+    method_qualifier(data, strout);
+    method_name(data, strout);
 }
 
-static inline bool class_is_refinement(VALUE klass, VALUE klass_of_klass) {
-    if (!RTEST(klass)) return false;
-    return FL_TEST(klass_of_klass, RMODULE_IS_REFINEMENT);
+static void method_qualifier(struct internal_frame_data data, struct mpp_strbuilder *strout) {
+    VALUE defined_class = data.cme ? data.cme->defined_class : Qnil;
+    VALUE class_of_defined_class = RTEST(defined_class) ? rb_class_of(defined_class) : Qnil;
+
+
+    if (RTEST(class_of_defined_class) && FL_TEST(class_of_defined_class, RMODULE_IS_REFINEMENT)) {
+        // The method being called is defined on a refinement.
+        VALUE refinement_module = class_of_defined_class;
+        mod_to_s_refinement(refinement_module, strout);
+        mpp_strbuilder_appendf(strout, "#");
+        return;
+    }
+
+    if (data.self == main_object) {
+        // Special case - calling methods directly on the toplevel binding.
+        backtracie_strbuilder_appendf(strout, "Object$<main>#");
+        return;
+    }
+
+    VALUE self_class = rb_class_of(data.self);
+    VALUE real_self_class = rb_class_real(self_class);
+
+    if (RTEST(defined_class) && FL_TEST(defined_class, FL_SINGLETON)) {
+        if (real_self_class == rb_cModule || real_self_class == rb_cClass) {
+            // This is a special case - it means a singleton method is being called
+            // directly on a module - e.g. if we have:
+            //
+            //   class Klazz; def self.moo; end; end;
+            //
+            // Then:
+            //
+            //    Klazz.moo => Should fall into this block.
+            //    Klazz.new.singleton_class.moo => Will _not_ fall into this block.
+            mod_to_s_singleton(defined_class, strout);
+            mpp_strbuilder_appendf(strout, ".");
+            return;
+        }
+    }
+
+    if (CLASS_OR_MODULE_P(data.self)) {
+        if (real_self_class == rb_cModule || real_self_class == rb_cClass) {
+            // This special case means that self is a module/class instance, which means
+            // we're executing code inside a module (i.e. module Foo; ...; end; )
+            // In that case, we want to print "Foo" instead of "Module".
+            mod_to_s(data.self, strout);
+            mpp_strbuilder_appendf(strout, "#");
+            return;    
+        }
+    }
+
+    // The base case - use either the class on which the CME is defined, if we have a CME,
+    // or else the class of self, as the method qualifier.
+    VALUE method_target = RTEST(defined_class) ? defined_class : self_class;
+    mod_to_s(method_target, strout);
+    mpp_strbuilder_appendf(strout, "#");
 }
 
-static inline bool class_is_singleton(VALUE klass) {
-    return FL_TEST(klass, FL_SINGLETON);
+static void method_name(struct internal_frame_data data, struct mpp_strbuilder *strout)  {
+    if (RTEST(data.cme)) {
+        // With a callable method entry, things are simple; just use that.
+        VALUE method_name = rb_id2str(data.cme->called_id);
+        mpp_strbuilder_append_value(strout, method_name);
+        if (iseq_is_block_or_eval(data.iseq)) {
+            mpp_strbuilder_appendf(strout, "{block}");
+        }
+    } else if (RTEST(data.iseq)) {
+        // With no CME, we _DO NOT_ want to use iseq->base_label if we're a block, because otherwise
+        // it will print something like "block in (something)". In fact, using the iseq->base_label
+        // is pretty much a last resort. If we manage to write _anything_ else in our backtrace, we
+        // won't use it.
+        bool did_write_anything = false;
+        if (RB_TYPE_P(data.self, T_CLASS)) {
+            // No CME, and self being a class/module, means we're executing code inside a class Foo; ...; end;
+            mpp_strbuilder_appendf(strout, "{class exec}");
+            did_write_anything = true;
+        }
+        if (RB_TYPE_P(data.self, T_MODULE)) {
+            mpp_strbuilder_appendf(strout, "{module exec}");
+            did_write_anything = true;
+        }
+        if (iseq_is_block_or_eval(data.iseq)) {
+            mpp_strbuilder_appendf(strout, "{block}");
+            did_write_anything = true;
+        }
+        if (!did_write_anything) {
+            // As a fallback, use whatever is on the base_label.
+            VALUE location_name = data.iseq->body->location.base_label;
+            mpp_strbuilder_append_value(strout, location_name);
+        }
+    } else {
+        MPP_ASSERT_FAIL("don't know how to set method name");
+    }
 }
 
-static inline VALUE refinement_get_refined_class(VALUE refinement_module) {
+static void mod_to_s_singleton(VALUE klass, struct mpp_strbuilder *strout) {
+    VALUE singleton_of = rb_class_real(klass);
+    // If this is the singleton_class of a Class, or Module, we want to print
+    // the _value_ of the object, and _NOT_ its class.
+    // Basically:
+    //    module MyModule; end;
+    //    klazz = MyModule.singleton_class =>
+    //        we want to output "MyModule"
+    //       
+    //    klazz = Something.new.singleton_class =>
+    //        we want to output "Something"
+    //
+    if (singleton_of == rb_cModule || singleton_of == rb_cClass) {
+        // The first case. Use the id_attached symbol to get what this is the
+        // singleton_class _of_.
+        st_lookup(RCLASS_IV_TBL(klass), id__attached__, (st_data_t *)&singleton_of);
+    }
+    mod_to_s(singleton_of, strout);
+}
+
+static void mod_to_s_anon(VALUE klass, struct mpp_strbuilder *strout) {
+    // Anonymous module/class - print the name of the first non-anonymous super.
+    // something like "#{klazz.ancestors.map(&:name).compact.first}$anonymous"
+    //
+    // Note that if klazz is a module, we want to do this on klazz.class, not klazz
+    // itself:
+    //
+    //   irb(main):008:0> m = Module.new
+    //   => #<Module:0x00000000021a7208>
+    //   irb(main):009:0> m.ancestors
+    //   => [#<Module:0x00000000021a7208>]
+    //   # Not very useful - nothing with a name is in the ancestor chain
+    //   irb(main):010:0> m.class.ancestors
+    //   => [Module, Object, Kernel, BasicObject]
+    //   # Much more useful - we can call this Module$anonymous.
+    //
+    VALUE superclass;
+    VALUE superclass_name = Qnil;
+    if (RB_TYPE_P(klass, T_CLASS)) {
+        superclass = klass;
+    } else {
+        superclass = rb_class_of(klass);
+    }
+
+    do {
+        superclass = RCLASS_SUPER(superclass);
+        MPP_ASSERT_MSG(RTEST(superclass), "anonymous class has nil superclass");
+        superclass_name = rb_mod_name(superclass);
+    } while (!RTEST(superclass_name));
+    mpp_strbuilder_append_value(strout, superclass_name);
+}
+
+static void mod_to_s_refinement(VALUE refinement_module, struct mpp_strbuilder *strout) {
     ID id_refined_class;
     CONST_ID(id_refined_class, "__refined_class__");
-    return rb_attr_get(refinement_module, id_refined_class);
+    VALUE refined_class = rb_attr_get(refinement_module, id_refined_class);
+    ID id_defined_at;
+    CONST_ID(id_defined_at, "__defined_at__");
+    VALUE defined_at = rb_attr_get(refinement_module, id_defined_at);
+
+    mod_to_s(refined_class, strout);
+    mpp_strbuilder_appendf(strout, "$refinement@");
+    mod_to_s(defined_at, strout);
 }
 
-// A version of rb_class_path that doesn't allocate any VALUEs
-static inline void class_path(VALUE obj, struct mpp_string_builder *out) {
+static void mod_to_s(VALUE klass, struct mpp_strbuilder *strout) {
+    if (!CLASS_OR_MODULE_P(klass)) {
+        // An instance of something was passed in here - get the class of it.
+        klass = rb_class_of(klass);
+    }
+  
+    if (FL_TEST(klass, FL_SINGLETON)) {
+        mpp_mod_to_s_singleton(klass, strout);
+        mpp_strbuilder_appendf(strout, "$singleton");
+        return;
+    }
+
+    VALUE klass_name = rb_mod_name(klass);
+    if (!RTEST(rb_mod_name(klass))) {
+        mpp_mod_to_s_anon(klass, strout);
+        mpp_strbuilder_appendf(strout, "$anonymous");
+        return;
+    }
+
+    // Non-anonymous module/class.
+    // something like "#{klazz.name}"
+    mpp_strbuilder_append_value(strout, klass_name);
+}
+
+static bool iseq_is_block_or_eval(rb_iseq_t *iseq) {
+    if (!RTEST(iseq)) return false;
+    return iseq->body->type == ISEQ_TYPE_BLOCK ||
+        iseq->body->type == ISEQ_TYPE_EVAL;
+}
+
+// This is mostly a reimplementation of pathobj_path from vm_core.h
+static void iseq_path(rb_iseq_t *iseq, struct mpp_strbuilder *strout) {
+    if (!RTEST(iseq)) {
+        mpp_strbuilder_appendf(strout, "(unknown)");
+        return;
+    }
+
+    VALUE pathobj = iseq->body->location.pathobj;
+    VALUE path_str;
+    if (RB_TYPE_P(pathobj, T_STRING)) {
+	    path_str = pathobj;
+    } else {
+        MPP_ASSERT_MSG(RB_TYPE_P(pathobj, T_ARRAY), "pathobj in iseq was not array?");
+        path_str = RARRAY_AREF(pathobj, PATHOBJ_PATH);
+    }
     
-}
-
-// A version of rb_any_to_s that doesn't allocate any VALUEs
-static inline void any_to_s(VALUE obj, struct mpp_string_builder *out) {
-
-}
-
-
-// A version of rb_mod_to_s that doesn't allocate any VALUEs.
-static inline void module_to_s(VALUE klass, struct mpp_string_builder *out) {
-    if (class_is_singleton(klass)) {
-        mpp_string_builder_appendf(out, "<#Class:");
-        VALUE attached_to = rb_ivar_get(klass, id__attached__);
-        if (CLASS_OR_MODULE_P(attached_to)) {
-            module_to_s(attached_to, out);
-        } else {
-
-        }
-        mpp_string_builder_appendf(out, ">");
+    if (RTEST(path_str)) {
+        mpp_strbuilder_append_value(strout, path_str);
+    } else {
+        mpp_strbuilder_appendf(strout, "(unknown)");
     }
 }
 
-
-static void bt_frame_stringify_name(struct mpp_bt_frame_data frame_data, struct mpp_string_builder *name_out) {
-    VALUE defined_klass = cme_defined_class(frame_data.cme);
-    VALUE klass_of_defined_klass = rb_class_of(defined_klass);
-
-    if (class_is_refinement(defined_klass, klass_of_defined_klass)) {
-        VALUE refined_class = refinement_get_refined_class(klass_of_defined_klass);
-
-
+// This is mostly a reimplementation of calc_lineno from vm_backtrace.c
+static int iseq_calc_lineno(const rb_iseq_t *iseq, const VALUE *pc) {
+    if (!RTEST(iseq)) {
+        return 0;
+    }
+    if (!pc) {
+        // This can happen during VM bootup.
+        return 0;
+    }
+    else {
+        size_t pos = pc - iseq->body->iseq_encoded;; // no overflow
+        if (pos) {
+            // use pos-1 because PC points next instruction at the beginning of instruction
+            pos--;
+        }
+        return rb_iseq_line_no(iseq, pos);
     }
 }

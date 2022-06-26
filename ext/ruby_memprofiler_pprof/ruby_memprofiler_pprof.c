@@ -7,5 +7,6 @@ void Init_ruby_memprofiler_pprof_ext() {
     rb_ext_ractor_safe(true);
 
     rb_define_module("MemprofilerPprof");
+    mpp_setup_backtrace();
     mpp_setup_collector_class();
 }
