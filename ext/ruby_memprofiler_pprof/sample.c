@@ -1,164 +1,66 @@
 #include <ruby.h>
-#include <backtracie.h>
 #include "ruby_memprofiler_pprof.h"
 
-struct sample_process_protected_ctx {
-    struct mpp_sample *sample;
-    struct mpp_functab *functab;
-    struct mpp_sample_bt_processed *bt_processed;
-    uint32_t frame_count;
-};
-VALUE sample_process_protected(VALUE ctxarg);
-void add_values_to_mark_memo(VALUE value, void *ctxarg);
-void delete_values_from_mark_memo(VALUE value, void *ctxarg);
-
-struct mpp_sample *mpp_sample_new(VALUE allocated_value, backtracie_bt_t raw_backtrace, struct mpp_mark_memoizer *mark_memo) {
-    struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample));
-    sample->flags = 0;
+struct mpp_sample *mpp_sample_new(unsigned long frames_capacity) {
+    struct mpp_sample *sample = mpp_xmalloc(
+        sizeof(struct mpp_sample) + frames_capacity * sizeof(struct mpp_sample_frame)
+    );
+    sample->frames_capacity = frames_capacity;
+    sample->frames_count = 0;
     sample->refcount = 1;
-    sample->allocated_value_weak = allocated_value;
-    sample->raw_backtrace = raw_backtrace;
-    backtracie_bt_gc_mark_custom(raw_backtrace, add_values_to_mark_memo, mark_memo);
+    sample->allocated_value_weak = Qundef;
     return sample;
 }
 
-void add_values_to_mark_memo(VALUE value, void *ctxarg) {
-    struct mpp_mark_memoizer *mark_memo = (struct mpp_mark_memoizer *)ctxarg;
-    mpp_mark_memoizer_add(mark_memo, value);
-}
-
-void delete_values_from_mark_memo(VALUE value, void *ctxarg) {
-    struct mpp_mark_memoizer *mark_memo = (struct mpp_mark_memoizer *)ctxarg;
-    mpp_mark_memoizer_delete(mark_memo, value);
-}
-
-void mpp_sample_gc_mark(struct mpp_sample *sample) {
-    if (sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) {
-        // "processed" sample - nothing to mark!
-    } else {
-        // "raw" sample - we _would_ need to mark the underlying backtracie stuff,
-        // but it's in the mark memoizer map, so that should take care of marking it (once)
-    }
-}
-
-#ifdef HAVE_RB_GC_MARK_MOVABLE
-void mpp_sample_gc_compact(struct mpp_sample *sample) {
-    if (sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) {
-        // "processed" sample - nothing to move!
-    } else {
-        // "raw" sample - need to move the backtracie stuff
-        if (sample->raw_backtrace) {
-            backtracie_bt_gc_compact(sample->raw_backtrace);
-        }
-    }
-}
-#endif
-
+// Total size of all things owned by the sample, for accounting purposes
 size_t mpp_sample_memsize(struct mpp_sample *sample) {
-    size_t sz = sizeof(struct mpp_sample);
-    if (sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) {
-        // Need to measure the size of the "processed" backtrace
-        if (sample->processed_backtrace) {
-            sz += sizeof(struct mpp_sample_bt_processed);
-            sz += sample->processed_backtrace->num_frames * sizeof(struct mpp_sample_bt_processed_frame);
-        }
-    } else {
-        // Need to measure the size of the "raw" backtrace
-        if (sample->raw_backtrace) {
-            sz += backtracie_bt_memsize(sample->raw_backtrace);
-        }
-    }
-    return sz;
+    return sizeof(struct mpp_sample) +
+        sample->frames_capacity * sizeof(struct mpp_sample_frame);
 }
 
-uint8_t mpp_sample_refcount_inc(struct mpp_sample *sample) {
+// Increments the refcount on sample
+unsigned long mpp_sample_refcount_inc(struct mpp_sample *sample) {
     MPP_ASSERT_MSG(sample->refcount, "mpp_sample_refcount_inc: tried to increment zero refcount!");
     sample->refcount++;
     return sample->refcount;
 }
 
-uint8_t mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_functab *functab, struct mpp_mark_memoizer *mark_memo) {
+// Decrements the refcount on sample, freeing its resources if it drops to zero.
+unsigned long mpp_sample_refcount_dec(
+    struct mpp_sample *sample, struct mpp_strtab *strtab
+) {
     MPP_ASSERT_MSG(sample->refcount, "mpp_sample_refcount_dec: tried to decrement zero refcount!");
     sample->refcount--;
-    if (!sample->refcount) {
-        // Free the sample.
-        if (sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED) {
-            if (sample->processed_backtrace) {
-                // Unreference what was interned into the functab
-                for (size_t i = 0; i < sample->processed_backtrace->num_frames; i++) {
-                    mpp_functab_deref(functab, sample->processed_backtrace->frames[i].function_id);
-                }
-                mpp_free(sample->processed_backtrace);
-            }
-        } else {
-            // Haven't processed the sample into the functab; just release the raw backtracie.
-            if (sample->raw_backtrace) {
-                backtracie_bt_gc_mark_custom(sample->raw_backtrace, delete_values_from_mark_memo, mark_memo);
-                backtracie_bt_free(sample->raw_backtrace);
-            }
-        }
-        mpp_free(sample);
-        return 0;
+    if (sample->refcount) return sample->refcount;
+
+    // We need to free the sample.
+    
+    // Unreference what was previously interned into the strtab
+    for (size_t i = 0; i < sample->frames_count; i++) {
+        mpp_strtab_release(strtab, sample->frames[i].function_name, sample->frames[i].function_name_len);
+        mpp_strtab_release(strtab, sample->frames[i].file_name, sample->frames[i].file_name_len);
     }
-    return sample->refcount;
+
+    mpp_free(sample);
+    return 0;
 }
 
-void mpp_sample_process(struct mpp_sample *sample, struct mpp_functab *functab, struct mpp_mark_memoizer *mark_memo) {
-    MPP_ASSERT_MSG(!(sample->flags & MPP_SAMPLE_FLAGS_BT_PROCESSED), "mpp_sample_process called on already processed sample");
-    MPP_ASSERT_MSG(sample->raw_backtrace, "mpp_sample_process called on sample with no backtrace");
-    MPP_ASSERT_MSG(sample->refcount, "mpp_sample_process called with zero refcount");
+void mpp_sample_add_frame(
+    struct mpp_sample *sample, struct mpp_strtab *strtab, struct mpp_backtrace_frame *frame
+) {
+    if (!frame->frame_valid) return;
 
-    struct sample_process_protected_ctx ctx;
-    ctx.sample = sample;
-    ctx.functab = functab;
-    ctx.frame_count = backtracie_bt_get_frames_count(sample->raw_backtrace);
-    ctx.bt_processed = (struct mpp_sample_bt_processed *) mpp_xmalloc(
-        sizeof(struct mpp_sample_bt_processed) + ctx.frame_count * sizeof(struct mpp_sample_bt_processed_frame)
+    MPP_ASSERT_MSG(sample->frames_count < sample->frames_capacity, "no room for more frames!");
+    unsigned long ix = sample->frames_count;
+    sample->frames_count++;
+
+    mpp_strtab_intern_strbuilder(
+        strtab, &frame->qualified_method_name,
+        &sample->frames[ix].function_name, &sample->frames[ix].function_name_len
     );
-    ctx.bt_processed->num_frames = 0; // This will be incremented by sample_process_protected
-
-    int jump_tag = 0;
-    rb_protect(sample_process_protected, (VALUE)&ctx, &jump_tag);
-    if (jump_tag) {
-        // If an exception was thrown somewhere along the line, we need to free anything allocated by
-        // the frames that _did_ work. Basically, do sample_process_protected but in reverse.
-        for (size_t i = 0; i < ctx.bt_processed->num_frames; i++) {
-            mpp_functab_deref(functab, ctx.bt_processed->frames[i].function_id);
-        }
-        mpp_free(ctx.bt_processed);
-        rb_jump_tag(jump_tag);
-    }
-
-    // It worked, flip the sample into "processed" mode.
-    backtracie_bt_gc_mark_custom(sample->raw_backtrace, delete_values_from_mark_memo, mark_memo);
-    backtracie_bt_free(sample->raw_backtrace);
-    sample->raw_backtrace = NULL;
-    sample->flags |= MPP_SAMPLE_FLAGS_BT_PROCESSED;
-    sample->processed_backtrace = ctx.bt_processed;
-}
-
-VALUE sample_process_protected(VALUE ctxarg) {
-    struct sample_process_protected_ctx *ctx = (struct sample_process_protected_ctx *)ctxarg;
-
-    for (uint32_t i = 0; i < ctx->frame_count; i++) {
-        // Extract out the names & other values from the backtrace.
-        VALUE cme_or_iseq = backtracie_bt_get_frame_value(ctx->sample->raw_backtrace, i);
-        VALUE function_name = backtracie_bt_get_frame_method_name(ctx->sample->raw_backtrace, i);
-        VALUE file_name = backtracie_bt_get_frame_file_name(ctx->sample->raw_backtrace, i);
-        unsigned long line_number = backtracie_bt_get_frame_line_number(ctx->sample->raw_backtrace, i);
-
-        unsigned long function_id = mpp_functab_add_by_value(ctx->functab, cme_or_iseq, function_name, file_name);
-
-        ctx->bt_processed->frames[i].function_id = function_id;
-        ctx->bt_processed->frames[i].line_number = line_number;
-        ctx->bt_processed->num_frames++;
-    }
-    return Qnil;
-}
-
-void mpp_sample_mark_value_freed(struct mpp_sample *sample) {
-#ifndef HAVE_WORKING_RB_GC_FORCE_RECYCLE
-    MPP_ASSERT_MSG(!(sample->flags & MPP_SAMPLE_FLAGS_VALUE_FREED), "sample marked as freed twice");
-#endif
-    sample->flags |= MPP_SAMPLE_FLAGS_VALUE_FREED;
+    mpp_strtab_intern_strbuilder(
+        strtab, &frame->file_name,
+        &sample->frames[ix].file_name, &sample->frames[ix].file_name_len
+    );
+    sample->frames[ix].line_number = frame->line_number;
 }

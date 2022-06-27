@@ -58,6 +58,9 @@ static int mpp_is_pointer_to_heap(rb_objspace_t *objspace, void *ptr) {
 
 // Answers the question, would rb_obj_memsize_of crash on this object?
 bool mpp_is_value_still_validish(VALUE obj) {
+    if (obj == Qundef) {
+        return false;
+    }
     if (!mpp_is_pointer_to_heap(GET_VM()->objspace, (void *)obj)) {
         return false;
     }

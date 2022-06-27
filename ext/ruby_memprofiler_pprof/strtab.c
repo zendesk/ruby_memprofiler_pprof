@@ -270,6 +270,18 @@ void mpp_strtab_intern_rbstr(
     mpp_strtab_intern(tab, str, str_len, interned_str_out, interned_str_len_out);
 }
 
+// Interns the string pointed to by *builder
+void mpp_strtab_intern_strbuilder(
+    struct mpp_strtab *tab, struct mpp_strbuilder *builder,
+    const char **interned_str_out, size_t *interned_str_len_out
+) {
+    size_t strsize = builder->attempted_size;
+    if (strsize >= builder->original_bufsize) {
+        strsize = builder->original_bufsize - 1;
+    }
+    mpp_strtab_intern(tab, builder->original_buf, strsize, interned_str_out, interned_str_len_out);
+}
+
 static void mpp_strtab_release_by_key(struct mpp_strtab *tab, struct mpp_strtab_key lookup_key) {
     struct mpp_strtab_table_decrement_el_refcount_args cb_args;
     cb_args.el = NULL;

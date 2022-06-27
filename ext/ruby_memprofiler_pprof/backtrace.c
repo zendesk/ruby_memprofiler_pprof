@@ -9,8 +9,8 @@ static VALUE main_object;
 struct internal_frame_data {
     bool valid : 1;
     bool cfunc : 1;
-    rb_callable_method_entry_t *cme;
-    rb_iseq_t *iseq;
+    const rb_callable_method_entry_t *cme;
+    const rb_iseq_t *iseq;
     VALUE self;
 };
 
@@ -23,8 +23,8 @@ static void mod_to_s_anon(VALUE klass, struct mpp_strbuilder *strout);
 static void mod_to_s_refinement(VALUE refinement_module, struct mpp_strbuilder *strout);
 static void method_qualifier(struct internal_frame_data data, struct mpp_strbuilder *strout);
 static void method_name(struct internal_frame_data data, struct mpp_strbuilder *strout);
-static bool iseq_is_block_or_eval(rb_iseq_t *iseq);
-static void iseq_path(rb_iseq_t *iseq, struct mpp_strbuilder *strout);
+static bool iseq_is_block_or_eval(const rb_iseq_t *iseq);
+static void iseq_path(const rb_iseq_t *iseq, struct mpp_strbuilder *strout);
 static int iseq_calc_lineno(const rb_iseq_t *iseq, const VALUE *pc);
 
 void mpp_setup_backtrace() {
@@ -35,15 +35,32 @@ void mpp_setup_backtrace() {
     );
 }
 
-bool mpp_capture_backtrace_frame(VALUE thread, int frame, struct mpp_backtrace_frame *frameout) {
+unsigned long mpp_backtrace_frame_count(VALUE thread) {
+    rb_thread_t *thread_data = (rb_thread_t *) DATA_PTR(thread);
+    rb_execution_context_t *ec = thread_data->ec;
+
+    const rb_control_frame_t *last_cfp = ec->cfp;
+    // +2 because of the two dummy frames.
+    const rb_control_frame_t *start_cfp = RUBY_VM_END_CONTROL_FRAME(GET_EC()) - 2;
+
+    if (start_cfp < last_cfp) {
+        return 0;
+    } else {
+        return (unsigned long)(start_cfp - last_cfp + 1);
+    }
+}
+
+bool mpp_capture_backtrace_frame(VALUE thread, unsigned long frame, struct mpp_backtrace_frame *frameout) {
     rb_thread_t *thread_data = (rb_thread_t *) DATA_PTR(thread);
     rb_execution_context_t *ec = thread_data->ec;
 
     // The frame argument is zero-based with zero being "the frame closest to where execution is now"
     // (I couldn't decide if this was supposed to be the "top" or "bottom" of the callstack; but lower
     // frame argument --> more recently called function.
+    
     const rb_control_frame_t *cfp = ec->cfp + frame;
-    if (!RUBY_VM_VALID_CONTROL_FRAME_P(cfp, RUBY_VM_END_CONTROL_FRAME(ec))) {
+    if (!RUBY_VM_VALID_CONTROL_FRAME_P(cfp, RUBY_VM_END_CONTROL_FRAME(ec) - 2)) {
+        // +2 because of the two "dummy" frames at the bottom of the stack.
         // Means we're past the end of the stack. Return false, to have our caller
         // stop fetching frames.
         return false;
@@ -116,7 +133,12 @@ static void method_qualifier(struct internal_frame_data data, struct mpp_strbuil
 
     if (data.self == main_object) {
         // Special case - calling methods directly on the toplevel binding.
-        backtracie_strbuilder_appendf(strout, "Object$<main>#");
+        mpp_strbuilder_appendf(strout, "Object$<main>#");
+        return;
+    } else if (data.self == rb_mRubyVMFrozenCore) {
+        // Special case - this object is not accessible from Ruby, but
+        // using main#lambda calls it.
+        mpp_strbuilder_appendf(strout, "RubyVM::FrozenCore#");
         return;
     }
 
@@ -261,20 +283,20 @@ static void mod_to_s_refinement(VALUE refinement_module, struct mpp_strbuilder *
 }
 
 static void mod_to_s(VALUE klass, struct mpp_strbuilder *strout) {
-    if (!CLASS_OR_MODULE_P(klass)) {
+    if (!CLASS_OR_MODULE_P(klass) && !RB_TYPE_P(klass, T_ICLASS)) {
         // An instance of something was passed in here - get the class of it.
         klass = rb_class_of(klass);
     }
   
     if (FL_TEST(klass, FL_SINGLETON)) {
-        mpp_mod_to_s_singleton(klass, strout);
+        mod_to_s_singleton(klass, strout);
         mpp_strbuilder_appendf(strout, "$singleton");
         return;
     }
 
     VALUE klass_name = rb_mod_name(klass);
     if (!RTEST(rb_mod_name(klass))) {
-        mpp_mod_to_s_anon(klass, strout);
+        mod_to_s_anon(klass, strout);
         mpp_strbuilder_appendf(strout, "$anonymous");
         return;
     }
@@ -284,14 +306,14 @@ static void mod_to_s(VALUE klass, struct mpp_strbuilder *strout) {
     mpp_strbuilder_append_value(strout, klass_name);
 }
 
-static bool iseq_is_block_or_eval(rb_iseq_t *iseq) {
+static bool iseq_is_block_or_eval(const rb_iseq_t *iseq) {
     if (!RTEST(iseq)) return false;
     return iseq->body->type == ISEQ_TYPE_BLOCK ||
         iseq->body->type == ISEQ_TYPE_EVAL;
 }
 
 // This is mostly a reimplementation of pathobj_path from vm_core.h
-static void iseq_path(rb_iseq_t *iseq, struct mpp_strbuilder *strout) {
+static void iseq_path(const rb_iseq_t *iseq, struct mpp_strbuilder *strout) {
     if (!RTEST(iseq)) {
         mpp_strbuilder_appendf(strout, "(unknown)");
         return;

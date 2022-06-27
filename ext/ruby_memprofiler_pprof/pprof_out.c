@@ -42,7 +42,7 @@ static const struct st_hash_type intpair_st_hash_type = {
 
 // Initialize an already-allocated serialization context.
 struct mpp_pprof_serctx *mpp_pprof_serctx_new(
-        struct mpp_strtab *strtab, struct mpp_functab *functab, char *errbuf, size_t errbuflen
+        struct mpp_strtab *strtab, char *errbuf, size_t errbuflen
 ) {
     struct mpp_pprof_serctx *ctx = mpp_xmalloc(sizeof(struct mpp_pprof_serctx));
     ctx->allocator.func = mpp_pprof_upb_arena_malloc;
@@ -50,7 +50,6 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new(
     ctx->profile_proto = perftools_profiles_Profile_new(ctx->arena);
     ctx->function_pbs = st_init_numtable();
     ctx->location_pbs = st_init_table(&intpair_st_hash_type);
-    ctx->function_table = functab;
     ctx->loc_counter = 1;
 
     // Intern some strings we'll need to produce our output
@@ -110,10 +109,14 @@ struct mpp_pprof_serctx_map_add_ctx {
     int is_error;
     char *errbuf;
     size_t errbuflen;
-    struct mpp_functab_entry *func;
+    
+    const char *function_name;
+    size_t function_name_len;
+    const char *file_name;
+    size_t file_name_len;
 
     // for add_location
-    unsigned long line_number;
+    int line_number;
     unsigned long location_id_out;
 };
 
@@ -126,7 +129,7 @@ static int mpp_pprof_serctx_add_function(st_data_t *key, st_data_t *value, st_da
     struct mpp_pprof_serctx_map_add_ctx *thunkctx = (struct mpp_pprof_serctx_map_add_ctx *)data;
     struct perftools_profiles_Function *fn_proto = perftools_profiles_Profile_add_function(thunkctx->ctx->profile_proto, thunkctx->ctx->arena);
 
-    perftools_profiles_Function_set_id(fn_proto, thunkctx->func->id);
+    perftools_profiles_Function_set_id(fn_proto, (uintptr_t)thunkctx->function_name);
 
 #define FN_SET_STRINTERN_FIELD(field, str)                                                                  \
     do {                                                                                                    \
@@ -142,9 +145,9 @@ static int mpp_pprof_serctx_add_function(st_data_t *key, st_data_t *value, st_da
         perftools_profiles_Function_set_##field(fn_proto, interned);                                        \
     } while (0)
 
-    FN_SET_STRINTERN_FIELD(name, thunkctx->func->function_name);
-    FN_SET_STRINTERN_FIELD(system_name, thunkctx->func->function_name);
-    FN_SET_STRINTERN_FIELD(filename, thunkctx->func->file_name);
+    FN_SET_STRINTERN_FIELD(name, thunkctx->function_name);
+    FN_SET_STRINTERN_FIELD(system_name, thunkctx->function_name);
+    FN_SET_STRINTERN_FIELD(filename, thunkctx->file_name);
 
 #undef FN_SET_STRINTERN_FIELD
 
@@ -166,7 +169,7 @@ static int mpp_pprof_serctx_add_location(st_data_t *key, st_data_t *value, st_da
 
     perftools_profiles_Location_set_id(loc_proto, thunkctx->ctx->loc_counter++);
     perftools_profiles_Line *line_proto = perftools_profiles_Location_add_line(loc_proto, thunkctx->ctx->arena);
-    perftools_profiles_Line_set_function_id(line_proto, thunkctx->func->id);
+    perftools_profiles_Line_set_function_id(line_proto, (uintptr_t)thunkctx->function_name);
     perftools_profiles_Line_set_line(line_proto, (int64_t)thunkctx->line_number);
 
     thunkctx->location_id_out = perftools_profiles_Location_id(loc_proto);
@@ -175,9 +178,9 @@ static int mpp_pprof_serctx_add_location(st_data_t *key, st_data_t *value, st_da
 }
 
 int mpp_pprof_serctx_add_sample(
-    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, size_t allocated_size, char *errbuf, size_t errbuflen
+    struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen
 ) {
-    uint32_t frames_count = sample->processed_backtrace->num_frames;
+    uint32_t frames_count = sample->frames_count;
     perftools_profiles_Sample *sample_proto = perftools_profiles_Profile_add_sample(ctx->profile_proto, ctx->arena);
     uint64_t *location_ids =
         perftools_profiles_Sample_resize_location_id(sample_proto, frames_count, ctx->arena);
@@ -190,18 +193,23 @@ int mpp_pprof_serctx_add_sample(
         thunkctx.errbuf = errbuf;
         thunkctx.errbuflen = errbuflen;
         thunkctx.is_error = 0;
-        unsigned long function_id = sample->processed_backtrace->frames[i].function_id;
-        unsigned long line_number = sample->processed_backtrace->frames[i].line_number;
-        thunkctx.func = mpp_functab_lookup(ctx->function_table, function_id);
-        MPP_ASSERT_MSG(thunkctx.func, "missing function ID in function_table!");
+        thunkctx.function_name = sample->frames[i].function_name;
+        thunkctx.function_name_len = sample->frames[i].function_name_len;
+        thunkctx.file_name = sample->frames[i].file_name;
+        thunkctx.file_name_len = sample->frames[i].file_name_len;
         thunkctx.location_id_out = 0;
-        thunkctx.line_number = line_number;
+        thunkctx.line_number = sample->frames[i].line_number;
+
+
+        // Using the file name pointer as the function ID like this looks suspect, but works
+        // because all of the function names are interned in the same string interning table.
+        uintptr_t function_id = (uintptr_t)sample->frames[i].function_name;
 
         st_update(ctx->function_pbs, function_id, mpp_pprof_serctx_add_function, (st_data_t)&thunkctx);
         if (thunkctx.is_error) {
             return -1;
         }
-        uint64_t loc_key[2] = { function_id, line_number };
+        uint64_t loc_key[2] = { function_id, sample->frames[i].line_number };
         st_update(ctx->location_pbs, (st_data_t)&loc_key, mpp_pprof_serctx_add_location, (st_data_t)&thunkctx);
         if (thunkctx.is_error) {
             return -1;
@@ -212,7 +220,7 @@ int mpp_pprof_serctx_add_sample(
 
     // Values are (retained_count, retained_size).
     perftools_profiles_Sample_add_value(sample_proto, 1, ctx->arena);
-    perftools_profiles_Sample_add_value(sample_proto, (int64_t)allocated_size, ctx->arena);
+    perftools_profiles_Sample_add_value(sample_proto, (int64_t)sample->allocated_value_objsize, ctx->arena);
     return 0;
 }
 
