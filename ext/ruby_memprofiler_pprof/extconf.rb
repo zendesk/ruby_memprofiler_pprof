@@ -112,7 +112,6 @@ append_cflags([
   '-D_GNU_SOURCE', '-std=gnu11', # Use GNU C extensions (e.g. we use this for atomics)
   '-fvisibility=hidden', # Make sure our upb symbols don't clobber any others from other exts
   '-fno-optimize-sibling-calls',
-  '-Og',
 ])
 append_cflags(['-Wall', '-Wextra']) # Enable all the warnings
 # These diagnostics are not very interesting at all, just disable them.
@@ -138,9 +137,6 @@ $srcs += [
 $VPATH << "$(srcdir)/vendor/upb/upb"
 $VPATH << "$(srcdir)/vendor/upb/third_party/utf8_range"
 $INCFLAGS << " -I#{File.join($srcdir, "vendor/upb")}"
-
-# require 'backtracie/mkmf_support'
-# compile_with_backtracie!
 
 dir_config('ruby')
 
