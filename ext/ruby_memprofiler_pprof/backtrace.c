@@ -101,7 +101,7 @@ bool mpp_capture_backtrace_frame(VALUE thread, unsigned long frame, struct mpp_b
         // cfuncs in backtraces. That's not all that useful, and also it's bit tricky to
         // keep track of that in one pass through the stack without any kind of dynamic
         // allocation. Just put some generic rubbish in the filename.
-        mpp_strbuilder_appendf(&frameout->file_name, "(cfunc)");
+        mpp_strbuilder_append(&frameout->file_name, "(cfunc)");
         frameout->line_number = 0;
     } else {
         iseq_path(frame_data.iseq, &frameout->file_name);
@@ -127,18 +127,18 @@ static void method_qualifier(struct internal_frame_data data, struct mpp_strbuil
         // The method being called is defined on a refinement.
         VALUE refinement_module = class_of_defined_class;
         mod_to_s_refinement(refinement_module, strout);
-        mpp_strbuilder_appendf(strout, "#");
+        mpp_strbuilder_append(strout, "#");
         return;
     }
 
     if (data.self == main_object) {
         // Special case - calling methods directly on the toplevel binding.
-        mpp_strbuilder_appendf(strout, "Object$<main>#");
+        mpp_strbuilder_append(strout, "Object$<main>#");
         return;
     } else if (data.self == rb_mRubyVMFrozenCore) {
         // Special case - this object is not accessible from Ruby, but
         // using main#lambda calls it.
-        mpp_strbuilder_appendf(strout, "RubyVM::FrozenCore#");
+        mpp_strbuilder_append(strout, "RubyVM::FrozenCore#");
         return;
     }
 
@@ -157,7 +157,7 @@ static void method_qualifier(struct internal_frame_data data, struct mpp_strbuil
             //    Klazz.moo => Should fall into this block.
             //    Klazz.new.singleton_class.moo => Will _not_ fall into this block.
             mod_to_s_singleton(defined_class, strout);
-            mpp_strbuilder_appendf(strout, ".");
+            mpp_strbuilder_append(strout, ".");
             return;
         }
     }
@@ -168,7 +168,7 @@ static void method_qualifier(struct internal_frame_data data, struct mpp_strbuil
             // we're executing code inside a module (i.e. module Foo; ...; end; )
             // In that case, we want to print "Foo" instead of "Module".
             mod_to_s(data.self, strout);
-            mpp_strbuilder_appendf(strout, "#");
+            mpp_strbuilder_append(strout, "#");
             return;    
         }
     }
@@ -177,7 +177,7 @@ static void method_qualifier(struct internal_frame_data data, struct mpp_strbuil
     // or else the class of self, as the method qualifier.
     VALUE method_target = RTEST(defined_class) ? defined_class : self_class;
     mod_to_s(method_target, strout);
-    mpp_strbuilder_appendf(strout, "#");
+    mpp_strbuilder_append(strout, "#");
 }
 
 static void method_name(struct internal_frame_data data, struct mpp_strbuilder *strout)  {
@@ -186,7 +186,7 @@ static void method_name(struct internal_frame_data data, struct mpp_strbuilder *
         VALUE method_name = rb_id2str(data.cme->called_id);
         mpp_strbuilder_append_value(strout, method_name);
         if (iseq_is_block_or_eval(data.iseq)) {
-            mpp_strbuilder_appendf(strout, "{block}");
+            mpp_strbuilder_append(strout, "{block}");
         }
     } else if (RTEST(data.iseq)) {
         // With no CME, we _DO NOT_ want to use iseq->base_label if we're a block, because otherwise
@@ -196,15 +196,15 @@ static void method_name(struct internal_frame_data data, struct mpp_strbuilder *
         bool did_write_anything = false;
         if (RB_TYPE_P(data.self, T_CLASS)) {
             // No CME, and self being a class/module, means we're executing code inside a class Foo; ...; end;
-            mpp_strbuilder_appendf(strout, "{class exec}");
+            mpp_strbuilder_append(strout, "{class exec}");
             did_write_anything = true;
         }
         if (RB_TYPE_P(data.self, T_MODULE)) {
-            mpp_strbuilder_appendf(strout, "{module exec}");
+            mpp_strbuilder_append(strout, "{module exec}");
             did_write_anything = true;
         }
         if (iseq_is_block_or_eval(data.iseq)) {
-            mpp_strbuilder_appendf(strout, "{block}");
+            mpp_strbuilder_append(strout, "{block}");
             did_write_anything = true;
         }
         if (!did_write_anything) {
@@ -278,7 +278,7 @@ static void mod_to_s_refinement(VALUE refinement_module, struct mpp_strbuilder *
     VALUE defined_at = rb_attr_get(refinement_module, id_defined_at);
 
     mod_to_s(refined_class, strout);
-    mpp_strbuilder_appendf(strout, "$refinement@");
+    mpp_strbuilder_append(strout, "$refinement@");
     mod_to_s(defined_at, strout);
 }
 
@@ -290,14 +290,14 @@ static void mod_to_s(VALUE klass, struct mpp_strbuilder *strout) {
   
     if (FL_TEST(klass, FL_SINGLETON)) {
         mod_to_s_singleton(klass, strout);
-        mpp_strbuilder_appendf(strout, "$singleton");
+        mpp_strbuilder_append(strout, "$singleton");
         return;
     }
 
     VALUE klass_name = rb_mod_name(klass);
     if (!RTEST(rb_mod_name(klass))) {
         mod_to_s_anon(klass, strout);
-        mpp_strbuilder_appendf(strout, "$anonymous");
+        mpp_strbuilder_append(strout, "$anonymous");
         return;
     }
 
@@ -315,7 +315,7 @@ static bool iseq_is_block_or_eval(const rb_iseq_t *iseq) {
 // This is mostly a reimplementation of pathobj_path from vm_core.h
 static void iseq_path(const rb_iseq_t *iseq, struct mpp_strbuilder *strout) {
     if (!RTEST(iseq)) {
-        mpp_strbuilder_appendf(strout, "(unknown)");
+        mpp_strbuilder_append(strout, "(unknown)");
         return;
     }
 
@@ -331,7 +331,7 @@ static void iseq_path(const rb_iseq_t *iseq, struct mpp_strbuilder *strout) {
     if (RTEST(path_str)) {
         mpp_strbuilder_append_value(strout, path_str);
     } else {
-        mpp_strbuilder_appendf(strout, "(unknown)");
+        mpp_strbuilder_append(strout, "(unknown)");
     }
 }
 

@@ -29,9 +29,38 @@ void mpp_strbuilder_appendf(struct mpp_strbuilder *str, const char *fmt, ...) {
     va_end(fmtargs);
 }
 
+void mpp_strbuilder_append(struct mpp_strbuilder *str, const char *cat) {
+    size_t max_writesize = str->original_bufsize - (str->original_buf - str->curr_ptr);
+    size_t attempted_writesize_wo_nullterm = strlcat(str->curr_ptr, cat, max_writesize);
+    str->attempted_size += attempted_writesize_wo_nullterm;
+    if (attempted_writesize_wo_nullterm >= max_writesize) {
+        str->curr_ptr = str->original_buf + str->original_bufsize;
+    } else {
+        str->curr_ptr = str->curr_ptr + attempted_writesize_wo_nullterm;
+    }
+}
+
 void mpp_strbuilder_append_value(struct mpp_strbuilder *str, VALUE val) {
     MPP_ASSERT_MSG(RB_TYPE_P(val, T_STRING), "non T_STRING passed into mpp_strbuilder_append_value");
-    mpp_strbuilder_appendf(str, "%.*s", RSTRING_LEN(val), RSTRING_PTR(val));
+
+    const char *val_ptr = RSTRING_PTR(val);
+    size_t val_len = RSTRING_LEN(val);
+
+    size_t max_writesize = str->original_bufsize - (str->original_buf - str->curr_ptr);
+    size_t chars_to_copy = val_len;
+    if (chars_to_copy + 1 > max_writesize) {
+        chars_to_copy = max_writesize - 1; // leave room for NULL terminator.
+    }
+    memcpy(str->curr_ptr, val_ptr, chars_to_copy);
+    str->curr_ptr[chars_to_copy] = '\0';
+    str->attempted_size += val_len;
+    if (val_len + 1 > max_writesize) {
+        str->curr_ptr = str->original_buf + str->original_bufsize;
+    } else {
+        str->curr_ptr += val_len;
+    }
+
+
     RB_GC_GUARD(val);
 }
 

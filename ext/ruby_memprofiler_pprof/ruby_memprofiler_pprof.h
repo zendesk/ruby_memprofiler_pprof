@@ -106,6 +106,7 @@ struct mpp_strbuilder {
     size_t attempted_size;
 };
 
+void mpp_strbuilder_append(struct mpp_strbuilder *str, const char *cat);
 void mpp_strbuilder_appendf(struct mpp_strbuilder *str, const char *fmt, ...);
 void mpp_strbuilder_append_value(struct mpp_strbuilder *str, VALUE val);
 VALUE mpp_strbuilder_to_value(struct mpp_strbuilder *str);
