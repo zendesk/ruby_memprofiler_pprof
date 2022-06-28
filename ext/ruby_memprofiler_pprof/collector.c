@@ -6,6 +6,7 @@
 
 #include <ruby.h>
 #include <ruby/debug.h>
+#include <ruby/thread.h>
 
 #include "ruby_memprofiler_pprof.h"
 
@@ -74,28 +75,25 @@ static VALUE collector_start(VALUE self);
 static VALUE collector_stop(VALUE self);
 static VALUE collector_is_running(VALUE self);
 static VALUE collector_flush(int argc, VALUE *argv, VALUE self);
-struct thread_yield_state {
-    struct timespec last_yield_time;
-    unsigned long yield_interval_ns;
-    unsigned long iteration_counter;
-    unsigned long iteration_check_interval;
-};
-static void check_thread_yield(struct thread_yield_state *st);
-struct flush_prepresult_ctx {
+struct flush_protected_ctx {
     struct collector_cdata *cd;
-
-    // The pprof data
-    const char *pprof_outbuf;
-    size_t pprof_outbuf_len;
-
-    // Extra struff that needs to go onto the struct.
-    size_t heap_samples_count;
-    size_t dropped_samples_heap_bufsize;
-
-    // Output
-    VALUE retval;
+    struct mpp_pprof_serctx *serctx;
+    bool yield_gvl;
+    bool proactively_yield_gvl;
 };
-static VALUE flush_prepresult(VALUE ctxarg);
+static VALUE flush_protected(VALUE ctxarg);
+struct flush_nogvl_ctx {
+    struct collector_cdata *cd;
+    struct mpp_pprof_serctx *serctx;
+    char *pprof_outbuf;
+    size_t pprof_outbuf_len;
+    char *errbuf;
+    size_t sizeof_errbuf;
+    int r;
+    size_t actual_sample_count;
+};
+static void *flush_nogvl(void *ctx);
+static void flush_nogvl_unblock(void *ctx);
 static VALUE collector_profile(VALUE self);
 static VALUE collector_live_heap_samples_count(VALUE self);
 static VALUE collector_get_sample_rate(VALUE self);
@@ -455,63 +453,73 @@ static VALUE collector_is_running(VALUE self) {
     return cd->is_tracing ? Qtrue : Qfalse;
 }
 
-static bool is_thread_yield_time(struct thread_yield_state *st) {
-    struct timespec current_time;
-    clock_gettime(CLOCK_MONOTONIC, &current_time);
-    // Don't care about overflow; the absolute worst thing that might happen
-    // is that we do or do not call rb_thread_schedule an extra time.
-    unsigned long delta = (current_time.tv_sec - st->last_yield_time.tv_sec) * 1000000000 +
-            (current_time.tv_nsec - st->last_yield_time.tv_nsec);
-    return delta >= st->yield_interval_ns;
-}
-
-static void check_thread_yield(struct thread_yield_state *st) {
-    if (st->yield_interval_ns == 0) return;
-
-    st->iteration_counter++;
-    if (st->iteration_counter % st->iteration_check_interval != 0) return;
-
-    if (mpp_is_someone_else_waiting_for_gvl() || is_thread_yield_time(st)) {
-        rb_thread_schedule();
-        clock_gettime(CLOCK_MONOTONIC, &st->last_yield_time);
-    }
-}
-
 static VALUE collector_flush(int argc, VALUE *argv, VALUE self) {
     struct collector_cdata *cd = collector_cdata_get(self);
 
     // kwarg handling
     VALUE kwargs_hash = Qnil;
     rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, argc, argv, "00:", &kwargs_hash);
-    VALUE kwarg_values[1];
-    ID kwarg_ids[1];
-    kwarg_ids[0] = rb_intern("thread_yield_interval");
-    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 1, kwarg_values);
+    VALUE kwarg_values[2];
+    ID kwarg_ids[2];
+    kwarg_ids[0] = rb_intern("yield_gvl");
+    kwarg_ids[1] = rb_intern("proactively_yield_gvl");
+    rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 2, kwarg_values);
 
-    struct thread_yield_state th_yield_state;
-    th_yield_state.yield_interval_ns = 0;
-    if (kwarg_values[0] != Qundef && RTEST(kwarg_values[0])) {
-        th_yield_state.yield_interval_ns = NUM2ULONG(kwarg_values[0]);
+    bool yield_gvl = false;
+    bool proactively_yield_gvl = false;
+
+    if (kwarg_values[0] != Qundef) {
+        yield_gvl = RTEST(kwarg_values[0]);
     }
-    clock_gettime(CLOCK_MONOTONIC, &th_yield_state.last_yield_time);
-    th_yield_state.iteration_counter = 0;
-    th_yield_state.iteration_check_interval = 20;
+    if (kwarg_values[1] != Qundef) {
+        proactively_yield_gvl = RTEST(kwarg_values[1]);
+    }
 
+#define DO_PROACTIVE_GVL_YIELD(counter) do { \
+        if ( \
+            proactively_yield_gvl && \
+            counter % 25 == 0 && \
+            mpp_is_someone_else_waiting_for_gvl() \
+        ) { \
+            rb_thread_schedule(); \
+        } \
+    } while (0);
 
-    // Normally not a fan pointlessly declaring all vars at the top of a function, but in this
-    // case we need it, to ensure they're all appropriately initialized for the out: block
-    // in case we have to goto out.
+    struct flush_protected_ctx ctx;
+    ctx.cd = cd;
+    ctx.proactively_yield_gvl = proactively_yield_gvl;
+    ctx.yield_gvl = yield_gvl;
+    ctx.serctx = NULL;
     int jump_tag = 0;
-    char errbuf[256];
-    VALUE retval = Qundef;
-    struct mpp_pprof_serctx *serctx = NULL;
-    int r = 0;
+    VALUE retval = rb_protect(flush_protected, (VALUE)&ctx, &jump_tag);
+
+    if (ctx.serctx) mpp_pprof_serctx_destroy(ctx.serctx);
+    if (cd->heap_samples_flush_copy) {
+        for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
+            DO_PROACTIVE_GVL_YIELD(i);
+            mpp_sample_refcount_dec(cd->heap_samples_flush_copy[i], cd->string_table);
+        }
+        mpp_free(cd->heap_samples_flush_copy);
+        cd->heap_samples_flush_copy = NULL;
+        cd->heap_samples_flush_copy_count = 0;
+    }
+    cd->flush_thread = Qnil;
+
+    // Now return-or-raise back to ruby.
+    if (jump_tag) {
+        rb_jump_tag(jump_tag);
+    }
+    return retval;
+}
+
+static VALUE flush_protected(VALUE ctxarg) {
+    struct flush_protected_ctx *ctx = (struct flush_protected_ctx *)ctxarg;
+    struct collector_cdata *cd = ctx->cd;
+    bool proactively_yield_gvl = ctx->proactively_yield_gvl;
 
     if (cd->heap_samples_flush_copy) {
-        ruby_snprintf(errbuf, sizeof(errbuf), "concurrent calls to #flush are not valid");
-        goto out;
+        rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof: concurrent calls to #flush are not valid");
     }
-
     cd->flush_thread = rb_thread_current();
 
     size_t dropped_samples_bufsize = cd->dropped_samples_heap_bufsize;
@@ -528,15 +536,16 @@ static VALUE collector_flush(int argc, VALUE *argv, VALUE self) {
     // have to worry about what happens if something is deleted from the map while we're iterating it.
     st_values(cd->heap_samples, (st_data_t *)cd->heap_samples_flush_copy, cd->heap_samples_flush_copy_count);
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
-        check_thread_yield(&th_yield_state);
-
+        DO_PROACTIVE_GVL_YIELD(i);
         mpp_sample_refcount_inc(cd->heap_samples_flush_copy[i]);
     }
+
+    DO_PROACTIVE_GVL_YIELD(0);
 
 
     // Capture their size, if possible.
     for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
-        check_thread_yield(&th_yield_state);
+        DO_PROACTIVE_GVL_YIELD(i);
         struct mpp_sample *sample = cd->heap_samples_flush_copy[i];
         if (mpp_is_value_still_validish(sample->allocated_value_weak)) {
             sample->allocated_value_objsize = mpp_rb_obj_memsize_of(sample->allocated_value_weak);
@@ -544,93 +553,83 @@ static VALUE collector_flush(int argc, VALUE *argv, VALUE self) {
             sample->allocated_value_weak = Qundef;
         }
     }
+    DO_PROACTIVE_GVL_YIELD(0);
 
     // Begin setting up pprof serialisation.
-    serctx = mpp_pprof_serctx_new(cd->string_table, errbuf, sizeof(errbuf));
-    if (!serctx) {
-        goto out;
+    char errbuf[256];
+    ctx->serctx = mpp_pprof_serctx_new(cd->string_table, errbuf, sizeof(errbuf));
+    if (!ctx->serctx) {
+        rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof: failed flushing samples: %s", errbuf);
+    }
+    struct mpp_pprof_serctx *serctx = ctx->serctx;
+    DO_PROACTIVE_GVL_YIELD(0);
+
+    struct flush_nogvl_ctx nogvl_ctx;
+    nogvl_ctx.errbuf = errbuf;
+    nogvl_ctx.sizeof_errbuf = sizeof(errbuf);
+    nogvl_ctx.serctx = serctx;
+    nogvl_ctx.cd = cd;
+    nogvl_ctx.actual_sample_count = 0;
+    
+    if (ctx->yield_gvl) {
+        rb_thread_call_without_gvl(flush_nogvl, &nogvl_ctx, flush_nogvl_unblock, &nogvl_ctx);
+    } else {
+        flush_nogvl(&nogvl_ctx);
     }
 
-    // Add each sample from our internal copy.
-    size_t actual_sample_count = 0;
-    for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
-        check_thread_yield(&th_yield_state);
-
-        struct mpp_sample *sample = cd->heap_samples_flush_copy[i];
-        if (sample->allocated_value_weak != Qundef) {
-            r = mpp_pprof_serctx_add_sample(serctx, sample, errbuf, sizeof(errbuf));
-            if (r == -1) {
-                goto out;
-            }
-            actual_sample_count++;
-        }
+    if (nogvl_ctx.r == -1) {
+        rb_raise(
+            rb_eRuntimeError,
+            "ruby_memprofiler_pprof: failed serialising samples: %s", nogvl_ctx.errbuf
+        );
     }
-
-    // And now serialise to pprof.
-    // The outpout buffer actually is allocated on the upb arena, so we don't need to free it; they will be freed implicitly
-    // when the serialisation context is destroyed.
-    char *pprof_outbuf;
-    size_t pprof_outbuf_len;
-    r = mpp_pprof_serctx_serialize(serctx, &pprof_outbuf, &pprof_outbuf_len, errbuf, sizeof(errbuf));
-    if (r == -1) {
-        goto out;
-    }
-
-    // Annoyingly, since rb_str_new could (in theory) throw, we have to rb_protect the whole construction
-    // of our return value to ensure we don't leak anything.
-    struct flush_prepresult_ctx prctx = {
-        .cd = cd,
-        .pprof_outbuf = pprof_outbuf,
-        .pprof_outbuf_len = pprof_outbuf_len,
-        .heap_samples_count = actual_sample_count,
-        .dropped_samples_heap_bufsize = dropped_samples_bufsize,
-        .retval = Qnil,
-    };
-    rb_protect(flush_prepresult, (VALUE)&prctx, &jump_tag);
-    if (jump_tag) {
-        goto out;
-    }
-    // OK! we have a Ruby object representing our profile data.
-    retval = prctx.retval;
-
- out:
-    if (serctx) mpp_pprof_serctx_destroy(serctx);
-    if (cd->heap_samples_flush_copy) {
-        for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
-            check_thread_yield(&th_yield_state);
-            mpp_sample_refcount_dec(cd->heap_samples_flush_copy[i], cd->string_table);
-        }
-        mpp_free(cd->heap_samples_flush_copy);
-        cd->heap_samples_flush_copy = NULL;
-        cd->heap_samples_flush_copy_count = 0;
-    }
-    cd->flush_thread = Qnil;
-
-    // Now return-or-raise back to ruby.
-    if (jump_tag) {
-        rb_jump_tag(jump_tag);
-    }
-    if (retval == Qundef) {
-        // Means we have an error to construct and throw
-        rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof failed serializing pprof protobuf: %s", errbuf);
-    }
-    return retval;
-}
-
-static VALUE flush_prepresult(VALUE ctxarg) {
-    struct flush_prepresult_ctx *ctx = (struct flush_prepresult_ctx *)ctxarg;
-
-    VALUE pprof_data = rb_str_new(ctx->pprof_outbuf, ctx->pprof_outbuf_len);
-    VALUE profile_data = rb_class_new_instance(0, NULL, ctx->cd->cProfileData);
+    
+    VALUE pprof_data = rb_str_new(nogvl_ctx.pprof_outbuf, nogvl_ctx.pprof_outbuf_len);
+    VALUE profile_data = rb_class_new_instance(0, NULL, cd->cProfileData);
     rb_funcall(profile_data, rb_intern("pprof_data="), 1, pprof_data);
-    rb_funcall(profile_data, rb_intern("heap_samples_count="), 1, SIZET2NUM(ctx->heap_samples_count));
+    rb_funcall(
+        profile_data, rb_intern("heap_samples_count="), 1,
+        SIZET2NUM(nogvl_ctx.actual_sample_count)
+    );
     rb_funcall(
         profile_data, rb_intern("dropped_samples_heap_bufsize="),
-        1, SIZET2NUM(ctx->dropped_samples_heap_bufsize)
+        1, SIZET2NUM(dropped_samples_bufsize)
     );
 
-    ctx->retval = profile_data;
-    return Qnil;
+    return profile_data;
+
+#undef DO_PROACTIVE_GVL_YIELD
+}
+
+static void *flush_nogvl(void *ctxarg) {
+    struct flush_nogvl_ctx *ctx = (struct flush_nogvl_ctx *)ctxarg;
+    struct collector_cdata *cd = ctx->cd;
+
+    for (size_t i = 0; i < cd->heap_samples_flush_copy_count; i++) {
+        struct mpp_sample *sample = cd->heap_samples_flush_copy[i];
+        if (sample->allocated_value_weak != Qundef) {
+            int r = mpp_pprof_serctx_add_sample(
+                ctx->serctx, sample, ctx->errbuf, ctx->sizeof_errbuf
+            );
+            if (r == -1) {
+                ctx->r = r;
+                return NULL;
+            }
+            ctx->actual_sample_count++;
+        }
+    }
+
+    ctx->r = mpp_pprof_serctx_serialize(
+        ctx->serctx, &ctx->pprof_outbuf, &ctx->pprof_outbuf_len,
+        ctx->errbuf, ctx->sizeof_errbuf
+    );
+    return NULL;
+}
+
+static void flush_nogvl_unblock(void *ctxarg) {
+    struct flush_nogvl_ctx *ctx = (struct flush_nogvl_ctx *)ctx;
+    uint8_t one = 1;
+    __atomic_store(&ctx->serctx->interrupt, &one, __ATOMIC_SEQ_CST);
 }
 
 

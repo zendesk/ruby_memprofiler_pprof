@@ -288,6 +288,9 @@ struct mpp_pprof_serctx {
     const char *internstr_bytes;
     const char *internstr_retained_objects;
     const char *internstr_retained_size;
+
+    // Toggle to interrupt (toggled from Ruby's GVL unblocking function)
+    uint8_t interrupt;
 };
 
 struct mpp_pprof_serctx *mpp_pprof_serctx_new(

@@ -3,6 +3,15 @@
 
 #include "ruby_memprofiler_pprof.h"
 
+#define CHECK_IF_INTERRUPTED(action) do {                               \
+    uint8_t interrupted;                                                \
+    __atomic_load(&ctx->interrupt, &interrupted, __ATOMIC_SEQ_CST);     \
+    if (interrupted) {                                                  \
+        snprintf(errbuf, errbuflen, "interrupted");                     \
+        action;                                                         \
+    }                                                                   \
+} while (0);
+
 // allocator/free function for our upb_arena. Contract is:
 // If "size" is 0 then the function acts like free(), otherwise it acts like
 // realloc().  Only "oldsize" bytes from a previous allocation are preserved.
@@ -51,6 +60,7 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new(
     ctx->function_pbs = st_init_numtable();
     ctx->location_pbs = st_init_table(&intpair_st_hash_type);
     ctx->loc_counter = 1;
+    ctx->interrupt = 0;
 
     // Intern some strings we'll need to produce our output
     mpp_strtab_intern_cstr(strtab, "count", &ctx->internstr_count, NULL);
@@ -180,13 +190,15 @@ static int mpp_pprof_serctx_add_location(st_data_t *key, st_data_t *value, st_da
 int mpp_pprof_serctx_add_sample(
     struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf, size_t errbuflen
 ) {
-    uint32_t frames_count = sample->frames_count;
+    CHECK_IF_INTERRUPTED(return -1);
+
+    size_t frames_count = sample->frames_count;
     perftools_profiles_Sample *sample_proto = perftools_profiles_Profile_add_sample(ctx->profile_proto, ctx->arena);
     uint64_t *location_ids =
         perftools_profiles_Sample_resize_location_id(sample_proto, frames_count, ctx->arena);
 
     // Protobuf needs to be in most-recent-call-first, and backtracie is also in that order.
-    for (uint32_t i = 0; i < frames_count; i++) {
+    for (size_t i = 0; i < frames_count; i++) {
         // Create protobufs for function/location ID as needed.
         struct mpp_pprof_serctx_map_add_ctx thunkctx;
         thunkctx.ctx = ctx;
@@ -233,6 +245,8 @@ int mpp_pprof_serctx_add_sample(
 int mpp_pprof_serctx_serialize(
     struct mpp_pprof_serctx *ctx, char **buf_out, size_t *buflen_out, char *errbuf, size_t errbuflen
 ) {
+    CHECK_IF_INTERRUPTED(return -1);
+
     // Include the string table in the output
     upb_StringView *stringtab_list_proto =
         perftools_profiles_Profile_resize_string_table(ctx->profile_proto, ctx->string_intern_index->str_list_len, ctx->arena);
@@ -243,10 +257,14 @@ int mpp_pprof_serctx_serialize(
         stringtab_proto->size = intern_tab_el->str_len;
     }
 
+    CHECK_IF_INTERRUPTED(return -1);
+
     // It looks like some codepaths might leak the protobuf_data pointer, but that's OK - it's in
     // the ctx->arena so it'll get freed when ctx does.
     size_t protobuf_data_len;
     char *protobuf_data = perftools_profiles_Profile_serialize(ctx->profile_proto, ctx->arena, &protobuf_data_len);
+
+    CHECK_IF_INTERRUPTED(return -1);
 
     // Gzip it as per standard.
     z_stream strm;
@@ -276,6 +294,8 @@ int mpp_pprof_serctx_serialize(
     strm.avail_out = out_chunk_size;
     strm.next_out = (unsigned char *)gzip_data;
     while(true) {
+        CHECK_IF_INTERRUPTED(goto zstream_free);
+
         int flush = strm.avail_in == 0 ? Z_FINISH : Z_NO_FLUSH;
         r = deflate(&strm, flush);
         if (r == Z_STREAM_END) {

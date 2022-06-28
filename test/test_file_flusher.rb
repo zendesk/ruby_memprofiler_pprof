@@ -43,7 +43,8 @@ describe MemprofilerPprof::FileFlusher do
       pattern: "#{@dir}/%{index}.pprof",
       interval: 2,
       logger: Logger.new(STDERR),
-      thread_yield_interval: 50_000_000_000,
+      yield_gvl: true,
+      proactively_yield_gvl: true,
     )
 
     flusher.run do

@@ -9,13 +9,14 @@ module MemprofilerPprof
 
     def initialize(
       collector, pattern: 'tmp/profiles/mem-%{pid}-%{isotime}.pprof', interval: 30, logger: nil, priority: nil,
-      thread_yield_interval: nil
+      yield_gvl: false, proactively_yield_gvl: false
     )
       @logger = logger
       @pattern = pattern
       @profile_counter = 0
       @block_flusher = BlockFlusher.new(
-        collector, interval: interval, logger: logger, priority: priority, thread_yield_interval: thread_yield_interval,
+        collector, interval: interval, logger: logger, priority: priority,
+        yield_gvl: yield_gvl, proactively_yield_gvl: proactively_yield_gvl,
         on_flush: method(:on_flush)
       )
     end
