@@ -97,6 +97,8 @@ VALUE mpp_rb_obj_memsize_of(VALUE obj);
 bool mpp_is_value_still_validish(VALUE obj);
 // Is some other thread blocked waiting for the GVL?
 bool mpp_is_someone_else_waiting_for_gvl();
+// Like rb_ivar_set, but ignore frozen status.
+VALUE mpp_rb_ivar_set_ignore_frozen(VALUE obj, ID key, VALUE value);
 
 // ======== STRBUILDER DECLARATIONS ========
 struct mpp_strbuilder {

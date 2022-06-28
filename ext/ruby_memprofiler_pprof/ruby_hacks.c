@@ -98,3 +98,15 @@ bool mpp_is_someone_else_waiting_for_gvl() {
     pthread_mutex_unlock(&GET_VM()->gvl.lock);
     return someone_waiting;
 }
+
+// Unfreezes a passed in object so we can force setting something on
+// its internal attributes hash.
+VALUE mpp_rb_ivar_set_ignore_frozen(VALUE obj, ID key, VALUE value) {
+    bool was_frozen = RB_OBJ_FROZEN(obj);
+    RB_FL_UNSET_RAW(obj, FL_FREEZE);
+    VALUE ret = rb_ivar_set(obj, key, value);
+    if (was_frozen) {
+        RB_FL_SET_RAW(obj, FL_FREEZE);
+    }
+    return ret;
+}
