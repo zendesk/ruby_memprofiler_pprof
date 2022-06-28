@@ -131,64 +131,54 @@ static void qualified_method_name_for_frame(
 
 static void method_qualifier(struct internal_frame_data data, struct mpp_strbuilder *strout) {
     VALUE defined_class = data.cme ? data.cme->defined_class : Qnil;
-    VALUE class_of_defined_class = RTEST(defined_class) ? rb_class_of(defined_class) : Qnil;
 
+    VALUE class_of_defined_class = RTEST(defined_class) ? rb_class_of(defined_class) : Qnil;
+    VALUE self_class = rb_class_of(data.self);
+    VALUE real_self_class = rb_class_real(self_class);
 
     if (RTEST(class_of_defined_class) && FL_TEST(class_of_defined_class, RMODULE_IS_REFINEMENT)) {
         // The method being called is defined on a refinement.
         VALUE refinement_module = class_of_defined_class;
         mod_to_s_refinement(refinement_module, strout);
         mpp_strbuilder_append(strout, "#");
-        return;
-    }
-
-    if (data.self == main_object) {
+    } else if (data.self == main_object) {
         // Special case - calling methods directly on the toplevel binding.
         mpp_strbuilder_append(strout, "Object$<main>#");
-        return;
     } else if (data.self == rb_mRubyVMFrozenCore) {
         // Special case - this object is not accessible from Ruby, but
         // using main#lambda calls it.
         mpp_strbuilder_append(strout, "RubyVM::FrozenCore#");
-        return;
+    } else if (
+        (RTEST(defined_class) && FL_TEST(defined_class, FL_SINGLETON)) &&
+        (real_self_class == rb_cModule || real_self_class == rb_cClass)
+    ) {
+        // This is a special case - it means a singleton method is being called
+        // directly on a module - e.g. if we have:
+        //
+        //   class Klazz; def self.moo; end; end;
+        //
+        // Then:
+        //
+        //    Klazz.moo => Should fall into this block.
+        //    Klazz.new.singleton_class.moo => Will _not_ fall into this block.
+        mod_to_s_singleton(defined_class, strout);
+        mpp_strbuilder_append(strout, ".");
+    } else if (
+        CLASS_OR_MODULE_P(data.self) &&
+        (real_self_class == rb_cModule || real_self_class == rb_cClass)
+    ) {
+        // This special case means that self is a module/class instance, which means
+        // we're executing code inside a module (i.e. module Foo; ...; end; )
+        // In that case, we want to print "Foo" instead of "Module".
+        mod_to_s(data.self, strout);
+        mpp_strbuilder_append(strout, "#");
+    } else {
+        // The base case - use either the class on which the CME is defined, if we have a CME,
+        // or else the class of self, as the method qualifier.
+        VALUE method_target = RTEST(defined_class) ? defined_class : self_class;
+        mod_to_s(method_target, strout);
+        mpp_strbuilder_append(strout, "#");
     }
-
-    VALUE self_class = rb_class_of(data.self);
-    VALUE real_self_class = rb_class_real(self_class);
-
-    if (RTEST(defined_class) && FL_TEST(defined_class, FL_SINGLETON)) {
-        if (real_self_class == rb_cModule || real_self_class == rb_cClass) {
-            // This is a special case - it means a singleton method is being called
-            // directly on a module - e.g. if we have:
-            //
-            //   class Klazz; def self.moo; end; end;
-            //
-            // Then:
-            //
-            //    Klazz.moo => Should fall into this block.
-            //    Klazz.new.singleton_class.moo => Will _not_ fall into this block.
-            mod_to_s_singleton(defined_class, strout);
-            mpp_strbuilder_append(strout, ".");
-            return;
-        }
-    }
-
-    if (CLASS_OR_MODULE_P(data.self)) {
-        if (real_self_class == rb_cModule || real_self_class == rb_cClass) {
-            // This special case means that self is a module/class instance, which means
-            // we're executing code inside a module (i.e. module Foo; ...; end; )
-            // In that case, we want to print "Foo" instead of "Module".
-            mod_to_s(data.self, strout);
-            mpp_strbuilder_append(strout, "#");
-            return;    
-        }
-    }
-
-    // The base case - use either the class on which the CME is defined, if we have a CME,
-    // or else the class of self, as the method qualifier.
-    VALUE method_target = RTEST(defined_class) ? defined_class : self_class;
-    mod_to_s(method_target, strout);
-    mpp_strbuilder_append(strout, "#");
 }
 
 static void method_name(struct internal_frame_data data, struct mpp_strbuilder *strout)  {
