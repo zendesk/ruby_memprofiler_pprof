@@ -26,13 +26,212 @@ static bool iseq_is_block_or_eval(const rb_iseq_t *iseq);
 static void iseq_path(const rb_iseq_t *iseq, struct mpp_strbuilder *strout);
 static int iseq_calc_lineno(const rb_iseq_t *iseq, const VALUE *pc);
 
+struct frame_cache_key {
+    // Either the defined_class of a CME, or the class_of(self)
+    // for an iseq.
+    VALUE method_defined_on;
+    // Either a CME, or an iseq
+    VALUE method_def;
+};
+
+struct frame_cache_value {
+    const char *qualified_method_name;
+    size_t qualified_method_name_len;
+    const char *file_name;
+    size_t file_name_len;
+};
+
+struct frame_cache_lru_node {
+    struct frame_cache_lru_node *next;
+    struct frame_cache_lru_node *prev;
+    struct frame_cache_key key;
+    struct frame_cache_value value;
+};
+
+struct frame_cache {
+    st_table *table;
+    struct frame_cache_lru_node *lru_head;
+    struct frame_cache_lru_node *lru_tail;
+    size_t count;
+    struct mpp_strtab *strtab;
+    VALUE finalizer_callback;
+};
+
+static int frame_st_hash_compare(st_data_t arg1, st_data_t arg2) {
+    struct frame_cache_key *k1 = (struct frame_cache_key *)arg1;
+    struct frame_cache_key *k2 = (struct frame_cache_key *)arg2;
+
+    if (k1->method_defined_on != k2->method_defined_on) {
+        return k1->method_defined_on < k2->method_defined_on;
+    } else {
+        return k1->method_def < k2->method_def;
+    }
+}
+
+static st_index_t frame_st_hash_hash(st_data_t arg) {
+    struct frame_cache_key *k = (struct frame_cache_key *)arg;
+    return st_hash(k, sizeof(struct frame_cache_key), FNV1_32A_INIT);
+}
+
+static const struct st_hash_type frame_st_hash_type = {
+    .compare = frame_st_hash_compare,
+    .hash = frame_st_hash_hash,
+};
+
+static void frame_cache_gc_mark(void *ptr);
+static void frame_cache_gc_free(void *ptr);
+static size_t frame_cache_gc_memsize(const void *ptr);
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+static void frame_cache_gc_compact(void *ptr);
+#endif
+static void frame_cache_init(struct frame_cache *ch, struct mpp_strtab *strtab);
+static void frame_cache_add(
+    struct frame_cache *ch, struct frame_cache_key key, struct frame_cache_value value
+);
+static int frame_cache_add_updatefunc(
+    st_data_t *key, st_data_t *value, st_data_t data, int existing
+);
+static bool frame_cache_lookup(
+    struct frame_cache *ch, struct frame_cache_key key, struct frame_cache_value *value
+);
+static struct frame_cache *frame_cache_cdata;
+static VALUE frame_cache_value;
+
+static const rb_data_type_t frame_cache_cdata_type = {
+    "collector_cdata",
+    {
+        frame_cache_gc_mark, frame_cache_gc_free, frame_cache_gc_memsize,
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+        frame_cache_gc_compact,
+#endif
+        { 0 }, /* reserved */
+    },
+    /* parent, data, [ flags ] */
+    NULL, NULL, 0
+};
+
 void mpp_setup_backtrace() {
     main_object = rb_funcall(
         rb_const_get(rb_cObject, rb_intern("TOPLEVEL_BINDING")),
         rb_intern("eval"),
         1, rb_str_new2("self")
     );
+
+    frame_cache_value = TypedData_Make_Struct(
+        rb_cObject, struct frame_cache, &frame_cache_cdata_type, frame_cache_cdata
+    );
+    rb_global_variable(&frame_cache_value);
 }
+
+static void frame_cache_gc_mark(void *ptr) {
+    struct frame_cache *ch = (struct frame_cache *)ptr;
+
+}
+
+static void frame_cache_gc_free(void *ptr) {
+    struct frame_cache *ch = (struct frame_cache *)ptr;
+    struct frame_cache_lru_node *node = ch->lru_head;
+    while (node) {
+        struct frame_cache_lru_node *next = node->next;
+        mpp_strtab_release(
+            ch->strtab,
+            node->value.qualified_method_name, node->value.qualified_method_name_len
+        );
+        mpp_strtab_release(
+            ch->strtab,
+            node->value.file_name, node->value.file_name_len
+        );
+        mpp_free(node);
+        node = next;
+    }
+}
+
+static size_t frame_cache_gc_memsize(const void *ptr) {
+    return 0;
+}
+
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+static void frame_cache_gc_compact(void *ptr) {
+    struct frame_cache *ch = (struct frame_cache *)ptr;
+    ch->finalizer_callback = rb_gc_location(ch->finalizer_callback);
+
+    struct frame_cache_lru_node *node = ch->lru_head;
+    while (node) {
+        VALUE new_method_defined_on = rb_gc_location(node->key.method_defined_on);
+        VALUE new_method_def = rb_gc_locaton(node->key.method_def);
+        if (
+            new_method_defined_on != node->key.method_defined_on ||
+            new_method_def != node->key.method_def
+        ) {
+            int already_existed = st_delete(ch->table, (st_data_t)&node->key, NULL);
+            MPP_ASSERT_MSG(already_existed, "frame cache compact: node not found in table");
+            node->key.method_def = new_method_defined_on;
+            node->key.method_def = new_method_def;
+            already_existed = st_insert(ch->table, (st_data_t)&node->key, (st_data_t)&node);
+            MPP_ASSERT_MSG(!already_existed, "frame cache compact: double-insert of node");
+        }
+        node = node->next;
+    }
+}
+#endif
+
+static void frame_cache_init(struct frame_cache *ch, struct mpp_strtab *strtab) {
+    ch->lru_head = NULL;
+    ch->lru_tail = NULL;
+    ch->table = st_init_table(&frame_st_hash_type);
+    ch->count = 0;
+    ch->strtab = strtab;
+}
+
+static void frame_cache_add(
+    struct frame_cache *ch, struct frame_cache_key key, struct frame_cache_value value
+) {
+    struct frame_cache_lru_node *node = mpp_xmalloc(sizeof(struct frame_cache_lru_node));
+    node->key = key;
+    node->value = value;
+    node->prev = NULL;
+    node->next = ch->lru_head;
+    ch->lru_head = node;
+    int already_existed = st_insert(ch->table, (st_data_t)&key, (st_data_t)&node);
+    MPP_ASSERT_MSG(!already_existed, "double-insert into frame LRU cache");
+    ch->count++;
+
+    rb_define_finalizer()
+}
+
+static bool frame_cache_lookup(
+    struct frame_cache *ch, struct frame_cache_key key, struct frame_cache_value *value
+) {
+    struct frame_cache_lru_node *node;
+    int exists = st_lookup(ch->table, (st_data_t)&key, (st_data_t *)&node);
+    if (!exists) {
+        return false;
+    }
+
+    // Object already exists in the cache, bump it up the LRU list.
+    if (node->next) {
+        node->next->prev = node->prev;
+    } else {
+        // We were the tail.
+        ch->lru_tail = node->prev;
+    }
+    if (node->prev) {
+        node->prev->next = node->next;
+    } else {
+        // We were the LRU head. Do nothing
+    }
+
+    if (ch->lru_head != node) {
+        node->prev = NULL;
+        node->next = ch->lru_head;
+        ch->lru_head = node;
+    }
+
+    *value = node->value;
+    return true;
+}
+
+
 
 unsigned long mpp_backtrace_frame_count(VALUE thread) {
     rb_thread_t *thread_data = (rb_thread_t *) DATA_PTR(thread);
