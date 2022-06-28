@@ -365,17 +365,21 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
     bool more_frames = max_frames > 0;
     int frame_index = 0;
     while (more_frames) {
-        char function_name_buffer[256];
-        char file_name_buffer[256];
-
-        struct mpp_backtrace_frame frame;
-        mpp_strbuilder_init(&frame.file_name, file_name_buffer, sizeof(file_name_buffer));
-        mpp_strbuilder_init(
-            &frame.qualified_method_name, function_name_buffer, sizeof(function_name_buffer)
+        unsigned long ret = mpp_capture_backtrace_frame(
+            this_thread, frame_index, &sample->frames[sample->frames_count], cd->string_table
         );
-        more_frames = mpp_capture_backtrace_frame(this_thread, frame_index, &frame);
-        mpp_sample_add_frame(sample, cd->string_table, &frame);
+        
+        // At this point, the sample contains pointers to strings that were just interned
+        // into the stringtab. The refcount for those strings in the stringtab was incremented
+        // by mpp_capture_backtrace_frame. We will decrement that refcount back when the
+        // sample is freed (that's done in mpp_sample_refcount_dec)
+
+        more_frames = ret & MPP_BT_MORE_FRAMES;
         frame_index++;
+        if (ret & MPP_BT_FRAME_VALID) {
+            // We stored something.
+            sample->frames_count++;
+        }
     }
 
     // insert into live sample map

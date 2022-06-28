@@ -3,7 +3,7 @@
 
 struct mpp_sample *mpp_sample_new(unsigned long frames_capacity) {
     struct mpp_sample *sample = mpp_xmalloc(
-        sizeof(struct mpp_sample) + frames_capacity * sizeof(struct mpp_sample_frame)
+        sizeof(struct mpp_sample) + frames_capacity * sizeof(struct mpp_backtrace_frame)
     );
     sample->frames_capacity = frames_capacity;
     sample->frames_count = 0;
@@ -15,7 +15,7 @@ struct mpp_sample *mpp_sample_new(unsigned long frames_capacity) {
 // Total size of all things owned by the sample, for accounting purposes
 size_t mpp_sample_memsize(struct mpp_sample *sample) {
     return sizeof(struct mpp_sample) +
-        sample->frames_capacity * sizeof(struct mpp_sample_frame);
+        sample->frames_capacity * sizeof(struct mpp_backtrace_frame);
 }
 
 // Increments the refcount on sample
@@ -43,24 +43,4 @@ unsigned long mpp_sample_refcount_dec(
 
     mpp_free(sample);
     return 0;
-}
-
-void mpp_sample_add_frame(
-    struct mpp_sample *sample, struct mpp_strtab *strtab, struct mpp_backtrace_frame *frame
-) {
-    if (!frame->frame_valid) return;
-
-    MPP_ASSERT_MSG(sample->frames_count < sample->frames_capacity, "no room for more frames!");
-    unsigned long ix = sample->frames_count;
-    sample->frames_count++;
-
-    mpp_strtab_intern_strbuilder(
-        strtab, &frame->qualified_method_name,
-        &sample->frames[ix].function_name, &sample->frames[ix].function_name_len
-    );
-    mpp_strtab_intern_strbuilder(
-        strtab, &frame->file_name,
-        &sample->frames[ix].file_name, &sample->frames[ix].file_name_len
-    );
-    sample->frames[ix].line_number = frame->line_number;
 }

@@ -7,8 +7,7 @@
 static VALUE main_object;
 
 struct internal_frame_data {
-    bool valid : 1;
-    bool cfunc : 1;
+    bool cfunc;
     const rb_callable_method_entry_t *cme;
     const rb_iseq_t *iseq;
     VALUE self;
@@ -50,7 +49,10 @@ unsigned long mpp_backtrace_frame_count(VALUE thread) {
     }
 }
 
-bool mpp_capture_backtrace_frame(VALUE thread, unsigned long frame, struct mpp_backtrace_frame *frameout) {
+unsigned long mpp_capture_backtrace_frame(
+    VALUE thread, unsigned long frame, struct mpp_backtrace_frame *frameout,
+    struct mpp_strtab *strtab
+) {
     rb_thread_t *thread_data = (rb_thread_t *) DATA_PTR(thread);
     rb_execution_context_t *ec = thread_data->ec;
 
@@ -61,14 +63,13 @@ bool mpp_capture_backtrace_frame(VALUE thread, unsigned long frame, struct mpp_b
     const rb_control_frame_t *cfp = ec->cfp + frame;
     if (!RUBY_VM_VALID_CONTROL_FRAME_P(cfp, RUBY_VM_END_CONTROL_FRAME(ec) - 2)) {
         // +2 because of the two "dummy" frames at the bottom of the stack.
-        // Means we're past the end of the stack. Return false, to have our caller
-        // stop fetching frames.
-        return false;
+        // Means we're past the end of the stack. Return without MPP_BT_MORE_FRAMES,
+        // to have our caller stop fetching frames.
+        return 0;
     }
 
     const rb_callable_method_entry_t *cme = rb_vm_frame_method_entry(cfp);
     struct internal_frame_data frame_data = {
-        .valid = false,
         .cfunc = false,
         .cme = cme,
         .iseq = cfp->iseq,
@@ -77,37 +78,47 @@ bool mpp_capture_backtrace_frame(VALUE thread, unsigned long frame, struct mpp_b
 
     if (cfp->iseq && !cfp->pc) {
         // Apparently means that this frame shouldn't appear in a backtrace
+        return MPP_BT_MORE_FRAMES;
     } else if (VM_FRAME_RUBYFRAME_P(cfp)) {
         // A frame executing Ruby code
-        frame_data.valid = true;
+        frame_data.cfunc = false;
     } else if (cme && cme->def->type == VM_METHOD_TYPE_CFUNC) {
         // A frame executing C code
-        frame_data.valid = true;
         frame_data.cfunc = true;
     } else {
         // Also shouldn't appear in backtraces.
+        return MPP_BT_MORE_FRAMES;
     }
 
-    if (!frame_data.valid) {
-        frameout->frame_valid = false;
-        return true; // There may be more frames.
-    }
+    char buf[256];
+    struct mpp_strbuilder builder;
+    mpp_strbuilder_init(&builder, buf, sizeof(buf));
 
-    // Fill in the method name
-    qualified_method_name_for_frame(frame_data, &frameout->qualified_method_name);
+    // Fill in the method name and intern it
+    qualified_method_name_for_frame(frame_data, &builder);
+    mpp_strtab_intern_strbuilder(
+        strtab, &builder, &frameout->function_name, &frameout->function_name_len
+    );
+
+    mpp_strbuilder_init(&builder, buf, sizeof(buf));
 
     if (frame_data.cfunc) {
         // The built-in ruby stuff uses the next-highest Ruby frame as the filename for
         // cfuncs in backtraces. That's not all that useful, and also it's bit tricky to
         // keep track of that in one pass through the stack without any kind of dynamic
         // allocation. Just put some generic rubbish in the filename.
-        mpp_strbuilder_append(&frameout->file_name, "(cfunc)");
+        mpp_strbuilder_append(&builder, "(cfunc)");
         frameout->line_number = 0;
     } else {
-        iseq_path(frame_data.iseq, &frameout->file_name);
+        iseq_path(frame_data.iseq, &builder);
         frameout->line_number = iseq_calc_lineno(frame_data.iseq, cfp->pc);
     }
-    return true;
+
+    mpp_strtab_intern_strbuilder(
+        strtab, &builder, &frameout->file_name, &frameout->file_name_len
+    );
+
+    return MPP_BT_MORE_FRAMES | MPP_BT_FRAME_VALID;
 }
 
 

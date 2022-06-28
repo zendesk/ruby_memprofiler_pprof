@@ -217,13 +217,28 @@ void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *c
 
 // ======== BACKTRACE DECLARATIONS ========
 struct mpp_backtrace_frame {
-    bool frame_valid;
-    struct mpp_strbuilder qualified_method_name;
-    struct mpp_strbuilder file_name;
+    // These strings are interned in the strtab.
+    const char *function_name;
+    size_t function_name_len;
+    const char *file_name;
+    size_t file_name_len;
     int line_number;
 };
 void mpp_setup_backtrace();
-bool mpp_capture_backtrace_frame(VALUE thread, unsigned long frame, struct mpp_backtrace_frame *frameout);
+// Meaning of the return bits for mpp_capture_backtrace_frame
+#define MPP_BT_MORE_FRAMES (1 << 0)
+#define MPP_BT_FRAME_VALID (1 << 1)
+// The memory semantics of mpp_capture_backtrace_frame are a bit tricky. They are:
+//     - When called, frameout must point to an (unitialized) mpp_backtrace_frame
+//     - On return, the *_name and *_len fields of that struct will point to interned
+//       strings, interned into strtab
+//     - It is the _caller's_ responsibility to de-intern these strings when it's done
+//       with them
+//     - That happens, at the moment, in mpp_sample_refcount_dec
+unsigned long mpp_capture_backtrace_frame(
+    VALUE thread, unsigned long frame, struct mpp_backtrace_frame *frameout,
+    struct mpp_strtab *strtab
+);
 unsigned long mpp_backtrace_frame_count(VALUE thread);
 
 // ======== SAMPLE DECLARATIONS ========
@@ -238,15 +253,7 @@ struct mpp_sample {
     size_t allocated_value_objsize;
     size_t frames_count;
     size_t frames_capacity;
-    struct mpp_sample_frame {
-        // These strings MUST be interned in the strtab.
-        const char *function_name;
-        size_t function_name_len;
-        const char *file_name;
-        size_t file_name_len;
-        // Line number on the specified function, if available; else zero.
-        int line_number;
-    } frames[];
+    struct mpp_backtrace_frame frames[];
 };
 
 // Creates a new sample with 1 refcount.
@@ -257,10 +264,6 @@ size_t mpp_sample_memsize(struct mpp_sample *sample);
 unsigned long mpp_sample_refcount_inc(struct mpp_sample *sample);
 // Decrements the refcount on sample, freeing its resources if it drops to zero.
 unsigned long mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_strtab *strtab);
-// Adds a frame to the sample, interning its name into the strtab.
-void mpp_sample_add_frame(
-    struct mpp_sample *sample, struct mpp_strtab *strtab, struct mpp_backtrace_frame *frame
-);
 
 // ======== PROTO SERIALIZATION ROUTINES ========
 struct mpp_pprof_serctx {
