@@ -25,6 +25,7 @@ static void method_name(struct internal_frame_data data, struct mpp_strbuilder *
 static bool iseq_is_block_or_eval(const rb_iseq_t *iseq);
 static void iseq_path(const rb_iseq_t *iseq, struct mpp_strbuilder *strout);
 static int iseq_calc_lineno(const rb_iseq_t *iseq, const VALUE *pc);
+static bool class_or_module_or_iclass(VALUE obj);
 
 void mpp_setup_backtrace() {
     main_object = rb_funcall(
@@ -164,7 +165,7 @@ static void method_qualifier(struct internal_frame_data data, struct mpp_strbuil
         mod_to_s_singleton(defined_class, strout);
         mpp_strbuilder_append(strout, ".");
     } else if (
-        CLASS_OR_MODULE_P(data.self) &&
+        class_or_module_or_iclass(data.self) &&
         (real_self_class == rb_cModule || real_self_class == rb_cClass)
     ) {
         // This special case means that self is a module/class instance, which means
@@ -254,16 +255,16 @@ static void mod_to_s_anon(VALUE klass, struct mpp_strbuilder *strout) {
     //   => [Module, Object, Kernel, BasicObject]
     //   # Much more useful - we can call this Module$anonymous.
     //
-    VALUE superclass;
+    VALUE superclass = klass;
     VALUE superclass_name = Qnil;
-    if (RB_TYPE_P(klass, T_CLASS)) {
-        superclass = klass;
-    } else {
-        superclass = rb_class_of(klass);
+    // Find an actual class - every _class_ is guaranteed to be a descendant of BasicObject
+    // at least, which has a name, so we'll be able to name this _something_.
+    while (!RB_TYPE_P(superclass, T_CLASS)) {
+        superclass = rb_class_of(superclass);
     }
 
     do {
-        superclass = RCLASS_SUPER(superclass);
+        superclass = rb_class_superclass(superclass);
         MPP_ASSERT_MSG(RTEST(superclass), "anonymous class has nil superclass");
         superclass_name = rb_mod_name(superclass);
     } while (!RTEST(superclass_name));
@@ -284,11 +285,6 @@ static void mod_to_s_refinement(VALUE refinement_module, struct mpp_strbuilder *
 }
 
 static void mod_to_s(VALUE klass, struct mpp_strbuilder *strout) {
-    if (!CLASS_OR_MODULE_P(klass) && !RB_TYPE_P(klass, T_ICLASS)) {
-        // An instance of something was passed in here - get the class of it.
-        klass = rb_class_of(klass);
-    }
-  
     if (FL_TEST(klass, FL_SINGLETON)) {
         mod_to_s_singleton(klass, strout);
         mpp_strbuilder_append(strout, "$singleton");
@@ -311,6 +307,12 @@ static bool iseq_is_block_or_eval(const rb_iseq_t *iseq) {
     if (!RTEST(iseq)) return false;
     return iseq->body->type == ISEQ_TYPE_BLOCK ||
         iseq->body->type == ISEQ_TYPE_EVAL;
+}
+
+static bool class_or_module_or_iclass(VALUE obj) {
+    return RB_TYPE_P(obj, T_CLASS) ||
+        RB_TYPE_P(obj, T_ICLASS) ||
+        RB_TYPE_P(obj, T_MODULE);
 }
 
 // This is mostly a reimplementation of pathobj_path from vm_core.h
