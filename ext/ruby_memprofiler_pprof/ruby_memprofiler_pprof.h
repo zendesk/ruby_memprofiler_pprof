@@ -248,8 +248,6 @@ unsigned long mpp_backtrace_frame_count(VALUE thread);
 // The struct mpp_sample is the core type for the data collected by ruby_memprofiler_pprof.
 
 struct mpp_sample {
-    // The refcount will only ever be zero, one, or two
-    unsigned long refcount;
     // VALUE of the sampled object that was allocated, or Qundef it it's freed.
     VALUE allocated_value_weak;
     size_t allocated_value_objsize;
@@ -258,14 +256,12 @@ struct mpp_sample {
     struct mpp_backtrace_frame frames[];
 };
 
-// Creates a new sample with 1 refcount.
+// Creates a new sample with the given frames capacity
 struct mpp_sample *mpp_sample_new(unsigned long frames_capacity);
 // Total size of all things owned by the sample, for accounting purposes
 size_t mpp_sample_memsize(struct mpp_sample *sample);
-// Increments the refcount on sample
-unsigned long mpp_sample_refcount_inc(struct mpp_sample *sample);
-// Decrements the refcount on sample, freeing its resources if it drops to zero.
-unsigned long mpp_sample_refcount_dec(struct mpp_sample *sample, struct mpp_strtab *strtab);
+// free the sample, including decrementing the refcount on any strings in the backtrace frames.
+void mpp_sample_free(struct mpp_sample *sample, struct mpp_strtab *strtab);
 
 // ======== PROTO SERIALIZATION ROUTINES ========
 struct mpp_pprof_serctx {
