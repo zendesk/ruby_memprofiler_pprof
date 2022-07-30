@@ -2,13 +2,6 @@
 
 require "mkmf"
 
-STDERR.puts "DEBUGGING BUILD:"
-STDERR.puts "ENV:"
-ENV.each do |k, v|
-  puts "\t#{k} => #{v}"
-end
-STDERR.puts "SELF: #{__FILE__}"
-
 # Support GC.compact on Ruby >=- 2.7
 have_func("rb_gc_mark_movable", ["ruby.h"])
 # Handle Ractors
@@ -152,6 +145,9 @@ $srcs += [
 $VPATH << "$(srcdir)/vendor/upb/upb"
 $VPATH << "$(srcdir)/vendor/upb/third_party/utf8_range"
 $INCFLAGS << " -I#{File.join($srcdir, "vendor/upb")}"
+
+# Include the vendored Backtracie header too
+$INCFLAGS << " -I#{File.join($srcdir, 'vendor/backtracie')}"
 
 dir_config("ruby")
 
