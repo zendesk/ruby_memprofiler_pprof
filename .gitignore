@@ -8,3 +8,5 @@ mkmf.log
 .vscode/
 .gdb_history
 extconf.h
+.cache/
+compile_commands.json
