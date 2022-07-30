@@ -1,3 +1,19 @@
+# frozen_string_literal: true
+
+# This is gross, but we need to set up bundler-inline to get access to backtracie here.
+# When doing 'bundle install' with a Gemfile that has ruby_memprofiler_pprof in, it will
+# (correctly) install backtracie before trying to run this extconf.rb file. BUT, after
+# doing that, it runs the extconf file _in a clean bundler env_, so it can't actually
+# access the just-installed backtracie.
+# I _think_ this is only an issue because the git gems get installed somewhere outside
+# of GEM_HOME, so, once there's a version of backtracie published to rubygems with the
+# header in it, this can go...
+require 'bundler/inline'
+gemfile do
+  gem 'backtracie', git: 'https://github.com/ivoanjo/backtracie.git', ref: 'main'
+end
+
+
 require "mkmf"
 
 # Support GC.compact on Ruby >=- 2.7
