@@ -208,7 +208,10 @@ int64_t mpp_strtab_index_of(struct mpp_strtab_index *ix, const char *interned_pt
 typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size_t interned_str_len, void *ctx);
 void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *ctx);
 
-// ======== BACKTRACE DECLARATIONS ========
+// ======== SAMPLE DECLARATIONS ========
+
+// The struct mpp_sample is the core type for the data collected by ruby_memprofiler_pprof.
+
 struct mpp_backtrace_frame {
   // These strings are interned in the strtab.
   const char *function_name;
@@ -217,24 +220,6 @@ struct mpp_backtrace_frame {
   size_t file_name_len;
   int line_number;
 };
-void mpp_setup_backtrace();
-// Meaning of the return bits for mpp_capture_backtrace_frame
-#define MPP_BT_MORE_FRAMES (1 << 0)
-#define MPP_BT_FRAME_VALID (1 << 1)
-// The memory semantics of mpp_capture_backtrace_frame are a bit tricky. They are:
-//     - When called, frameout must point to an (unitialized) mpp_backtrace_frame
-//     - On return, the *_name and *_len fields of that struct will point to interned
-//       strings, interned into strtab
-//     - It is the _caller's_ responsibility to de-intern these strings when it's done
-//       with them
-//     - That happens, at the moment, in mpp_sample_refcount_dec
-unsigned long mpp_capture_backtrace_frame(VALUE thread, unsigned long frame, struct mpp_backtrace_frame *frameout,
-                                          struct mpp_strtab *strtab);
-unsigned long mpp_backtrace_frame_count(VALUE thread);
-
-// ======== SAMPLE DECLARATIONS ========
-
-// The struct mpp_sample is the core type for the data collected by ruby_memprofiler_pprof.
 
 struct mpp_sample {
   // VALUE of the sampled object that was allocated, or Qundef it it's freed.
@@ -245,8 +230,8 @@ struct mpp_sample {
   struct mpp_backtrace_frame frames[];
 };
 
-// Creates a new sample with the given frames capacity
-struct mpp_sample *mpp_sample_new(unsigned long frames_capacity);
+// Captures a backtrace for a sample using Backtracie, interning the given strings.
+struct mpp_sample *mpp_sample_capture(struct mpp_strtab *strtab, VALUE allocated_value_weak);
 // Total size of all things owned by the sample, for accounting purposes
 size_t mpp_sample_memsize(struct mpp_sample *sample);
 // free the sample, including decrementing the refcount on any strings in the backtrace frames.

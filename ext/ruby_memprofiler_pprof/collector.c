@@ -8,6 +8,8 @@
 #include <ruby/debug.h>
 #include <ruby/thread.h>
 
+#include <backtracie.h>
+
 #include "ruby_memprofiler_pprof.h"
 
 struct collector_cdata {
@@ -361,29 +363,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 #endif
 
   // OK, now it's time to add to our sample buffer.
-  VALUE this_thread = rb_thread_current();
-  unsigned long max_frames = mpp_backtrace_frame_count(this_thread);
-  struct mpp_sample *sample = mpp_sample_new(max_frames);
-  sample->allocated_value_weak = newobj;
-  bool more_frames = max_frames > 0;
-  int frame_index = 0;
-  while (more_frames) {
-    unsigned long ret =
-        mpp_capture_backtrace_frame(this_thread, frame_index, &sample->frames[sample->frames_count], cd->string_table);
-
-    // At this point, the sample contains pointers to strings that were just interned
-    // into the stringtab. The refcount for those strings in the stringtab was incremented
-    // by mpp_capture_backtrace_frame. We will decrement that refcount back when the
-    // sample is freed (that's done in mpp_sample_refcount_dec)
-
-    more_frames = ret & MPP_BT_MORE_FRAMES;
-    frame_index++;
-    if (ret & MPP_BT_FRAME_VALID) {
-      // We stored something.
-      sample->frames_count++;
-    }
-  }
-
+  struct mpp_sample *sample = mpp_sample_capture(cd->string_table, newobj);
   // insert into live sample map
   int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);
   MPP_ASSERT_MSG(alread_existed == 0, "st_insert did an update in the newobj hook");
