@@ -6,14 +6,8 @@ require "bump/tasks"
 # Compile verbosely if specified.
 ENV["MAKE"] = "make V=1" if ENV["VERBOSE"] == "true"
 
-gemspec = Gem::Specification.load("ruby_memprofiler_pprof.gemspec")
-Rake::ExtensionTask.new do |ext|
-  ext.name = "ruby_memprofiler_pprof_ext"
-  ext.source_pattern = "*.{c,h}"
-  ext.ext_dir = "ext/ruby_memprofiler_pprof"
-  ext.lib_dir = "lib/ruby_memprofiler_pprof"
-  ext.gem_spec = gemspec
-end
+Rake::ExtensionTask.new("ruby_memprofiler_pprof_ext")
+
 Rake::TestTask.new(:test) do |t|
   t.libs << "test"
   t.libs << "lib"

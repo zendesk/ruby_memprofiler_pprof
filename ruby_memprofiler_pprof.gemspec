@@ -13,7 +13,7 @@ Gem::Specification.new do |spec|
   spec.license = "Apache-2.0"
 
   spec.files = Dir.glob("{ext,lib,libexec}/**/*").reject { |f| %w[.so .bundle].include? File.extname(f) }
-  spec.extensions = ["ext/ruby_memprofiler_pprof/extconf.rb"]
+  spec.extensions = ["ext/ruby_memprofiler_pprof_ext/extconf.rb"]
   spec.bindir = "libexec"
   spec.executables = %w[ruby_memprofiler_pprof_profile]
 
