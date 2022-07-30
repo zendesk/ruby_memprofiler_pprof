@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
-require 'bundler/setup'
-require 'ruby_memprofiler_pprof'
-require_relative 'pprof_pb'
+require "bundler/setup"
+require "ruby_memprofiler_pprof"
+require_relative "pprof_pb"
 require "minitest/autorun"
-require 'securerandom'
-require 'zlib'
-require 'timecop'
+require "securerandom"
+require "zlib"
+require "timecop"
 
 class DecodedProfileData
   class Sample
@@ -76,7 +76,6 @@ class DecodedProfileData
       acc + s.retained_size
     end
   end
-
 
   if Gem::Version.new(RUBY_VERSION) < Gem::Version.new("2.7")
     def method_missing(m, *args, &blk)

@@ -20,7 +20,7 @@ raise "Zlib headers & library are required!" unless has_zlib_headers && has_zlib
 
 # Need to actually link pthreads properly
 have_library("pthread") or raise "missing pthread library"
-have_func('clock_gettime', ['time.h']) or raise "missing clock_gettime"
+have_func("clock_gettime", ["time.h"]) or raise "missing clock_gettime"
 
 ruby_version = Gem::Version.new RUBY_VERSION
 
@@ -49,7 +49,7 @@ end
 # Ask the ruby interpreter at runtime if these features are enabled or not
 # The values detected this way will be used if they are not present in
 # the mjit header.
-gc_opt_keys = %w(
+gc_opt_keys = %w[
   GC_DEBUG
   USE_RGENGC
   RGENGC_DEBUG
@@ -62,12 +62,12 @@ gc_opt_keys = %w(
   MALLOC_ALLOCATED_SIZE
   MALLOC_ALLOCATED_SIZE_CHECK
   GC_PROFILE_DETAIL_MEMORY
-)
+]
 gc_opt_keys.each do |key|
-  if GC::OPTS.include?(key)
-    $defs << "-D#{key}=1"
+  $defs << if GC::OPTS.include?(key)
+    "-D#{key}=1"
   else
-    $defs << "-D#{key}=0"
+    "-D#{key}=0"
   end
 end
 
@@ -75,7 +75,7 @@ end
 # the C compiler will spew out multiple definition errors. So we pass a block
 # to the various have_* methods to strip that out (just the first one).
 STRIP_RUBY_INCLUDE = proc do |src|
-  src.sub(/#\s*include\s+["<]ruby\.h[">]/, '')
+  src.sub(/#\s*include\s+["<]ruby\.h[">]/, "")
 end
 
 # Record where to find the mjit header
@@ -104,22 +104,21 @@ checking_for checking_message("variable sized heap slots") do
   end
 end
 
-
 # Set our cflags up _only after_ we have run all the existence checks above; otherwise
 # stuff like -Werror can break the test programs.
 append_cflags([
-  '-g', # Compile with debug info
-  '-D_GNU_SOURCE', '-std=gnu11', # Use GNU C extensions (e.g. we use this for atomics)
-  '-fvisibility=hidden', # Make sure our upb symbols don't clobber any others from other exts
-  '-fno-optimize-sibling-calls',
+  "-g", # Compile with debug info
+  "-D_GNU_SOURCE", "-std=gnu11", # Use GNU C extensions (e.g. we use this for atomics)
+  "-fvisibility=hidden", # Make sure our upb symbols don't clobber any others from other exts
+  "-fno-optimize-sibling-calls"
 ])
-append_cflags(['-Wall', '-Wextra']) # Enable all the warnings
+append_cflags(["-Wall", "-Wextra"]) # Enable all the warnings
 # These diagnostics are not very interesting at all, just disable them.
 append_cflags([
-  '-Wno-unused-parameter',
-  '-Wno-declaration-after-statement',
-  '-Wno-suggest-attribute=noreturn',
-  '-Wno-suggest-attribute=format',
+  "-Wno-unused-parameter",
+  "-Wno-declaration-after-statement",
+  "-Wno-suggest-attribute=noreturn",
+  "-Wno-suggest-attribute=format"
 ])
 
 # Compile the upb objects into our extension as well.
@@ -132,13 +131,13 @@ $srcs += [
   "upb/upb.c",
   "third_party/utf8_range/naive.c",
   "third_party/utf8_range/range2-neon.c",
-  "third_party/utf8_range/range2-sse.c",
+  "third_party/utf8_range/range2-sse.c"
 ].map { |f| File.join($srcdir, "vendor/upb", f) }
 $VPATH << "$(srcdir)/vendor/upb/upb"
 $VPATH << "$(srcdir)/vendor/upb/third_party/utf8_range"
 $INCFLAGS << " -I#{File.join($srcdir, "vendor/upb")}"
 
-dir_config('ruby')
+dir_config("ruby")
 
 create_header
 create_makefile "ruby_memprofiler_pprof_ext"

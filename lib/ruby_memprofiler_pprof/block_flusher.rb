@@ -59,7 +59,6 @@ module MemprofilerPprof
       end
     end
 
-
     def unpause
       @status_mutex.synchronize do
         @is_paused = false

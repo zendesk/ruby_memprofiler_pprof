@@ -21,6 +21,7 @@ module MemprofilerPprof
     end
 
     module_function
+
     def at_fork_handlers
       @@at_fork_handlers ||= []
     end
@@ -56,7 +57,6 @@ module MemprofilerPprof
       # Trigger correct callbacks depending on whether we're in the parent or child.
       # If we're in the fork, result = nil: trigger child callbacks.
       # If we're in the parent, result = fork PID: trigger parent callbacks.
-      # rubocop:disable Style/IfInsideElse
       if result.nil?
         # Trigger :child callback
         at_fork_handlers.select { |h| h.stage == :child }.each(&:call)

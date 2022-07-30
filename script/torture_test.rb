@@ -1,18 +1,18 @@
 #!/usr/bin/env ruby
 
-require 'bundler/setup'
-require 'sinatra/base'
-require 'securerandom'
-require 'rack/mock'
-require 'thwait'
-require 'ruby_memprofiler_pprof'
+require "bundler/setup"
+require "sinatra/base"
+require "securerandom"
+require "rack/mock"
+require "thwait"
+require "ruby_memprofiler_pprof"
 
 Thread.abort_on_exception = true
 
 # This is a mock sinatra app, which will generate all the benchmarking.
 class TestApp < Sinatra::Base
   @bench_bucket = []
-  get '/bench' do
+  get "/bench" do
     if @bench_bucket.size < 50000
       rand(0..100).times do
         @bench_bucket << SecureRandom.hex(20)

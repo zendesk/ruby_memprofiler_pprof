@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 
-require_relative 'benchmark_support'
+require_relative "benchmark_support"
 
 Benchmark.bm(36) do |b|
   leak_pit = []
@@ -38,9 +38,7 @@ Benchmark.bm(36) do |b|
       $collector.start!
 
       benchmark_machine(sc, leak_pit)
-      File.open("tmp/benchmark-#{perc}p.pb.gz", 'w') do |f|
-        f.write $collector.flush.pprof_data
-      end
+      File.write("tmp/benchmark-#{perc}p.pb.gz", $collector.flush.pprof_data)
       $collector.stop!
     end
   end

@@ -1,12 +1,11 @@
 # frozen_string_literal: true
 
-require_relative 'test_helper'
-require 'fileutils'
-require 'tmpdir'
-require 'logger'
+require_relative "test_helper"
+require "fileutils"
+require "tmpdir"
+require "logger"
 
 class FakeSleepExtension
-
 end
 
 describe MemprofilerPprof::FileFlusher do
@@ -21,9 +20,11 @@ describe MemprofilerPprof::FileFlusher do
   def alloc_method_1
     SecureRandom.hex(10)
   end
+
   def alloc_method_2
     SecureRandom.hex(10)
   end
+
   def alloc_method_3
     SecureRandom.hex(10)
   end
@@ -36,16 +37,14 @@ describe MemprofilerPprof::FileFlusher do
     raise "File #{file} did not get created"
   end
 
-
-    it 'writes profiles to the directory' do
+  it "writes profiles to the directory" do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
     flusher = MemprofilerPprof::FileFlusher.new(c,
       pattern: "#{@dir}/%{index}.pprof",
       interval: 2,
-      logger: Logger.new(STDERR),
+      logger: Logger.new($stderr),
       yield_gvl: true,
-      proactively_yield_gvl: true,
-    )
+      proactively_yield_gvl: true)
 
     flusher.run do
       leak_list = []
@@ -63,18 +62,17 @@ describe MemprofilerPprof::FileFlusher do
     profile_1 = DecodedProfileData.new(File.read("#{@dir}/0.pprof"))
     profile_2 = DecodedProfileData.new(File.read("#{@dir}/1.pprof"))
 
-    assert profile_1.heap_samples_including_stack(['alloc_method_1']).size > 0
-    assert profile_1.heap_samples_including_stack(['alloc_method_2']).empty?
-    assert profile_2.heap_samples_including_stack(['alloc_method_2']).size > 0
+    assert profile_1.heap_samples_including_stack(["alloc_method_1"]).size > 0
+    assert profile_1.heap_samples_including_stack(["alloc_method_2"]).empty?
+    assert profile_2.heap_samples_including_stack(["alloc_method_2"]).size > 0
   end
 
-  it 'writes for both parent and child on fork' do
+  it "writes for both parent and child on fork" do
     c = MemprofilerPprof::Collector.new(sample_rate: 1.0)
     flusher = MemprofilerPprof::FileFlusher.new(c,
       pattern: "#{@dir}/%{pid}-%{index}.pprof",
       interval: 2,
-      logger: Logger.new(STDERR),
-    )
+      logger: Logger.new($stderr))
 
     flusher.start!
     c.start!
@@ -100,12 +98,12 @@ describe MemprofilerPprof::FileFlusher do
     profile_parent = DecodedProfileData.new(File.read("#{@dir}/#{parent_pid}-0.pprof"))
     profile_child = DecodedProfileData.new(File.read("#{@dir}/#{child_pid}-0.pprof"))
 
-    assert profile_parent.heap_samples_including_stack(['alloc_method_1']).size > 0
-    assert profile_parent.heap_samples_including_stack(['alloc_method_2']).empty?
-    assert profile_parent.heap_samples_including_stack(['alloc_method_3']).size > 0
+    assert profile_parent.heap_samples_including_stack(["alloc_method_1"]).size > 0
+    assert profile_parent.heap_samples_including_stack(["alloc_method_2"]).empty?
+    assert profile_parent.heap_samples_including_stack(["alloc_method_3"]).size > 0
 
-    assert profile_child.heap_samples_including_stack(['alloc_method_1']).size > 0
-    assert profile_child.heap_samples_including_stack(['alloc_method_2']).size > 0
-    assert profile_child.heap_samples_including_stack(['alloc_method_3']).empty?
+    assert profile_child.heap_samples_including_stack(["alloc_method_1"]).size > 0
+    assert profile_child.heap_samples_including_stack(["alloc_method_2"]).size > 0
+    assert profile_child.heap_samples_including_stack(["alloc_method_3"]).empty?
   end
 end
