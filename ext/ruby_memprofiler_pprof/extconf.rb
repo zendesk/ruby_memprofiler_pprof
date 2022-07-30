@@ -1,5 +1,7 @@
 require "mkmf"
 
+binding.irb
+
 # Support GC.compact on Ruby >=- 2.7
 have_func("rb_gc_mark_movable", ["ruby.h"])
 # Handle Ractors
