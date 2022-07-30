@@ -24,13 +24,6 @@ raise "Zlib headers & library are required!" unless has_zlib_headers && has_zlib
 have_library("pthread") or raise "missing pthread library"
 have_func("clock_gettime", ["time.h"]) or raise "missing clock_gettime"
 
-# Find the backtracie gem headers so we can link against it.
-backtracie_gem = Gem::Specification.find_by_name('backtracie')
-raise "backtracie gem not found!" unless backtracie_gem
-backtracie_include_dir = backtracie_gem.matches_for_glob('backtracie_native_extension/public/').first
-raise "backtracie public header directory not found" unless backtracie_include_dir
-find_header 'backtracie.h', backtracie_include_dir or raise "could not find backtracie.h"
-
 ruby_version = Gem::Version.new RUBY_VERSION
 
 # Ruby >= 3.1 has deprecated/no-opp'd rb_gc_force_recycle, which is good for us, because
