@@ -18,4 +18,5 @@ Gem::Specification.new do |spec|
   spec.executables = %w[ruby_memprofiler_pprof_profile]
 
   spec.required_ruby_version = ">= 2.6.0"
+  spec.add_dependency 'backtracie', '= 0.3.1.dev'
 end

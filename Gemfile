@@ -4,6 +4,8 @@ source "https://rubygems.org"
 
 gemspec
 
+gem 'backtracie', git: 'https://github.com/ivoanjo/backtracie', ref: '6940260'
+
 gem "bump", "~> 0.10"
 gem "google-protobuf", "~> 3"
 gem "minitest", "~> 5"
