@@ -86,6 +86,9 @@ struct flush_each_sample_ctx {
   int r;
   int i;
   size_t actual_sample_count;
+  int64_t nogvl_duration;
+  int64_t gvl_yield_count;
+  int64_t gvl_check_yield_count;
 };
 int flush_each_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
 struct flush_nogvl_ctx {
@@ -457,13 +460,6 @@ static VALUE collector_flush(int argc, VALUE *argv, VALUE self) {
     proactively_yield_gvl = RTEST(kwarg_values[1]);
   }
 
-#define DO_PROACTIVE_GVL_YIELD(counter)                                                                                \
-  do {                                                                                                                 \
-    if (proactively_yield_gvl && counter % 25 == 0 && mpp_is_someone_else_waiting_for_gvl()) {                         \
-      rb_thread_schedule();                                                                                            \
-    }                                                                                                                  \
-  } while (0);
-
   struct flush_protected_ctx ctx;
   ctx.cd = cd;
   ctx.proactively_yield_gvl = proactively_yield_gvl;
@@ -486,11 +482,20 @@ static VALUE collector_flush(int argc, VALUE *argv, VALUE self) {
 int flush_each_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
   struct flush_each_sample_ctx *ctx = (struct flush_each_sample_ctx *)ctxarg;
   struct collector_cdata *cd = ctx->cd;
-  bool proactively_yield_gvl = ctx->proactively_yield_gvl;
   struct mpp_sample *sample = (struct mpp_sample *)value;
   int ret;
 
-  DO_PROACTIVE_GVL_YIELD(ctx->i++);
+  if (ctx->proactively_yield_gvl && (ctx->i % 25 == 0)) {
+    ctx->gvl_check_yield_count++;
+    if (mpp_is_someone_else_waiting_for_gvl()) {
+      ctx->gvl_yield_count++;
+      struct timespec t1 = mpp_gettime_monotonic();
+      rb_thread_schedule();
+      struct timespec t2 = mpp_gettime_monotonic();
+      ctx->nogvl_duration += mpp_time_delta_nsec(t1, t2);
+    }
+  }
+  ctx->i++;
 
   // Need to disable GC so that our freeobj tracepoint hook can't delete the sample out of the map
   // after we've decided we're _also_ going to delete the sample out of the map.
@@ -519,6 +524,8 @@ int flush_each_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
 }
 
 static VALUE flush_protected(VALUE ctxarg) {
+  struct timespec t_start = mpp_gettime_monotonic();
+
   struct flush_protected_ctx *ctx = (struct flush_protected_ctx *)ctxarg;
   struct collector_cdata *cd = ctx->cd;
   bool proactively_yield_gvl = ctx->proactively_yield_gvl;
@@ -534,8 +541,6 @@ static VALUE flush_protected(VALUE ctxarg) {
     rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof: setting up serialisation: %s", errbuf);
   }
   struct mpp_pprof_serctx *serctx = ctx->serctx;
-  DO_PROACTIVE_GVL_YIELD(0);
-
   struct flush_each_sample_ctx sample_ctx;
   sample_ctx.r = 0;
   sample_ctx.i = 0;
@@ -545,6 +550,9 @@ static VALUE flush_protected(VALUE ctxarg) {
   sample_ctx.serctx = serctx;
   sample_ctx.cd = cd;
   sample_ctx.proactively_yield_gvl = proactively_yield_gvl;
+  sample_ctx.nogvl_duration = 0;
+  sample_ctx.gvl_yield_count = 0;
+  sample_ctx.gvl_check_yield_count = 0;
   st_foreach(cd->heap_samples, flush_each_sample, (st_data_t)&sample_ctx);
   if (sample_ctx.r == -1) {
     rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof: failed preparing samples for serialisation: %s",
@@ -557,6 +565,8 @@ static VALUE flush_protected(VALUE ctxarg) {
   nogvl_ctx.serctx = serctx;
   nogvl_ctx.cd = cd;
 
+  struct timespec t_serialize_start = mpp_gettime_monotonic();
+
   if (ctx->yield_gvl) {
     rb_thread_call_without_gvl(flush_nogvl, &nogvl_ctx, flush_nogvl_unblock, &nogvl_ctx);
   } else {
@@ -568,14 +578,23 @@ static VALUE flush_protected(VALUE ctxarg) {
   }
 
   VALUE pprof_data = rb_str_new(nogvl_ctx.pprof_outbuf, nogvl_ctx.pprof_outbuf_len);
+
+  struct timespec t_end = mpp_gettime_monotonic();
+
   VALUE profile_data = rb_class_new_instance(0, NULL, cd->cProfileData);
   rb_funcall(profile_data, rb_intern("pprof_data="), 1, pprof_data);
   rb_funcall(profile_data, rb_intern("heap_samples_count="), 1, SIZET2NUM(sample_ctx.actual_sample_count));
   rb_funcall(profile_data, rb_intern("dropped_samples_heap_bufsize="), 1, SIZET2NUM(dropped_samples_bufsize));
+  rb_funcall(profile_data, rb_intern("flush_duration_nsecs="), 1, INT2NUM(mpp_time_delta_nsec(t_start, t_end)));
+  rb_funcall(profile_data, rb_intern("sample_add_nsecs="), 1, INT2NUM(mpp_time_delta_nsec(t_start, t_serialize_start)));
+  rb_funcall(profile_data, rb_intern("pprof_serialization_nsecs="), 1,
+             INT2NUM(mpp_time_delta_nsec(t_serialize_start, t_end)));
+  rb_funcall(profile_data, rb_intern("sample_add_nsecs="), 1, INT2NUM(mpp_time_delta_nsec(t_start, t_serialize_start)));
+  rb_funcall(profile_data, rb_intern("sample_add_without_gvl_nsecs="), 1, INT2NUM(sample_ctx.nogvl_duration));
+  rb_funcall(profile_data, rb_intern("gvl_proactive_yield_count="), 1, INT2NUM(sample_ctx.gvl_yield_count));
+  rb_funcall(profile_data, rb_intern("gvl_proactive_check_yield_count="), 1, INT2NUM(sample_ctx.gvl_check_yield_count));
 
   return profile_data;
-
-#undef DO_PROACTIVE_GVL_YIELD
 }
 
 static void *flush_nogvl(void *ctxarg) {
