@@ -36,6 +36,6 @@ task :proto_compile do
 
   protoc_gen_upb = "#{upb_dir}/bazel-bin/upbc/protoc-gen-upb"
   sh "protoc", "--proto_path=proto", "--plugin=#{protoc_gen_upb}",
-    "--upb_out=ext/ruby_memprofiler_pprof", "--ruby_out=test",
+    "--upb_out=ext/ruby_memprofiler_pprof_ext", "--ruby_out=test",
     *Dir["proto/*.proto"]
 end
