@@ -4,10 +4,12 @@
 #include "extconf.h"
 
 #include <pthread.h>
-#include <ruby.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
+
+#include <ruby.h>
 
 // UPB header files trip up a BUNCH of -Wshorten-64-to-32
 // Also ignore -Wpragmas so that if -Wshorten-64-to-32 isn't present
@@ -46,6 +48,12 @@
 // These methods wrap all that rubbish up.
 uint32_t mpp_rand();
 void mpp_rand_init();
+
+// Wrapper to get monotonic time. Pre-sierra MacOS doesn't have clock_gettime, so we need a wrapper for this.
+// (n.b. - I haven't actually _implemented_ a fallback for pre-Sierra, but this is where we'd do it)
+// Returns time in nanoseconds.
+struct timespec mpp_gettime_monotonic();
+int64_t mpp_time_delta_nsec(struct timespec t1, struct timespec t2);
 
 // These declarations just wrap some things from the standard library that should "always succeed", but call
 // our assertion macro if they fail to abort the program.

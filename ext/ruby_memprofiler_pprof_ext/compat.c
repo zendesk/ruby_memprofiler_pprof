@@ -1,8 +1,10 @@
 #include <errno.h>
 #include <pthread.h>
-#include <ruby.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <time.h>
+
+#include <ruby.h>
 
 #include "ruby_memprofiler_pprof.h"
 
@@ -45,6 +47,16 @@ void mpp_rand_init() {
 #else
 #error "No suitable RNG implementation"
 #endif
+
+struct timespec mpp_gettime_monotonic() {
+  struct timespec tv;
+  clock_gettime(CLOCK_MONOTONIC, &tv);
+  return tv;
+}
+
+int64_t mpp_time_delta_nsec(struct timespec t1, struct timespec t2) {
+  return (t2.tv_sec - t1.tv_sec) * 1000000000 + (t2.tv_nsec - t1.tv_nsec);
+}
 
 void *mpp_xcalloc(size_t sz) {
   void *mem = mpp_xmalloc(sz);
