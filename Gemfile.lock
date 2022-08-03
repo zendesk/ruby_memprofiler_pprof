@@ -9,7 +9,7 @@ GIT
 PATH
   remote: .
   specs:
-    ruby_memprofiler_pprof (0.0.3)
+    ruby_memprofiler_pprof (0.0.4.dev)
       backtracie (= 0.3.1.dev)
 
 GEM

@@ -586,7 +586,6 @@ static VALUE flush_protected(VALUE ctxarg) {
   rb_funcall(profile_data, rb_intern("heap_samples_count="), 1, SIZET2NUM(sample_ctx.actual_sample_count));
   rb_funcall(profile_data, rb_intern("dropped_samples_heap_bufsize="), 1, SIZET2NUM(dropped_samples_bufsize));
   rb_funcall(profile_data, rb_intern("flush_duration_nsecs="), 1, INT2NUM(mpp_time_delta_nsec(t_start, t_end)));
-  rb_funcall(profile_data, rb_intern("sample_add_nsecs="), 1, INT2NUM(mpp_time_delta_nsec(t_start, t_serialize_start)));
   rb_funcall(profile_data, rb_intern("pprof_serialization_nsecs="), 1,
              INT2NUM(mpp_time_delta_nsec(t_serialize_start, t_end)));
   rb_funcall(profile_data, rb_intern("sample_add_nsecs="), 1, INT2NUM(mpp_time_delta_nsec(t_start, t_serialize_start)));

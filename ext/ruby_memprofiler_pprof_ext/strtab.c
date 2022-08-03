@@ -1,8 +1,10 @@
 #include <pthread.h>
 #include <string.h>
 
-#include "ruby_memprofiler_pprof.h"
 #include <ruby.h>
+#include <ruby/st.h>
+
+#include "ruby_memprofiler_pprof.h"
 
 static int mpp_strtab_strcompare(st_data_t arg1, st_data_t arg2) {
   struct mpp_strtab_key *k1 = (struct mpp_strtab_key *)arg1;
@@ -40,7 +42,7 @@ static void mpp_strtab_free_intern_tab_el(struct mpp_strtab_el *el) {
 struct mpp_strtab_table_extract_els_args {
   struct mpp_strtab_el **el_ary;
   int64_t el_ary_len;
-  int64_t el_ary_cur_ix;
+  int64_t el_ary_capa;
   int should_delete;
 };
 
@@ -50,13 +52,18 @@ static int mpp_strtab_table_extract_els(st_data_t key, st_data_t value, st_data_
   struct mpp_strtab_el *el = (struct mpp_strtab_el *)value;
   struct mpp_strtab_table_extract_els_args *args = (struct mpp_strtab_table_extract_els_args *)arg;
 
-  MPP_ASSERT_MSG(args->el_ary_cur_ix < args->el_ary_len,
+  MPP_ASSERT_MSG(args->el_ary_len < args->el_ary_capa,
                  "strtab: array passed in to mpp_strtab_table_extract_els not big enough?");
 
-  args->el_ary[args->el_ary_cur_ix] = el;
-  args->el_ary_cur_ix++;
+  args->el_ary[args->el_ary_len] = el;
+  args->el_ary_len++;
 
-  return args->should_delete ? ST_DELETE : ST_CONTINUE;
+  if (args->should_delete) {
+    return ST_DELETE;
+  } else {
+    el->refcount++;
+    return ST_CONTINUE;
+  }
 }
 
 struct mpp_strtab_table_decrement_el_refcount_args {
@@ -103,8 +110,8 @@ void mpp_strtab_destroy(struct mpp_strtab *tab) {
   // and freeing that before removing the element from the table would mean that it would do some use-after-free.
   struct mpp_strtab_table_extract_els_args table_loop_args;
   table_loop_args.should_delete = 1;
-  table_loop_args.el_ary_cur_ix = 0;
-  table_loop_args.el_ary_len = tab->table_count;
+  table_loop_args.el_ary_capa = tab->table_count;
+  table_loop_args.el_ary_len = 0;
   table_loop_args.el_ary = mpp_xmalloc(tab->table_count * sizeof(struct mpp_strtab_el *));
   st_foreach(tab->table, mpp_strtab_table_extract_els, (st_data_t)&table_loop_args);
 
@@ -316,9 +323,10 @@ struct mpp_strtab_index *mpp_strtab_index(struct mpp_strtab *tab) {
   // Accumulate a pointer to every element.
   struct mpp_strtab_table_extract_els_args table_loop_args;
   table_loop_args.should_delete = 0;
-  table_loop_args.el_ary_cur_ix = 0;
-  table_loop_args.el_ary_len = tab->table_count;
+  table_loop_args.el_ary_len = 0;
+  table_loop_args.el_ary_capa = tab->table_count;
   table_loop_args.el_ary = mpp_xmalloc(tab->table_count * sizeof(struct mpp_strtab_el *));
+  // This _also_ has the effect of adding one to the refcount of each item in the table.
   st_foreach(tab->table, mpp_strtab_table_extract_els, (st_data_t)&table_loop_args);
 
   // Just save the list straight on the index - the index owns that now.
@@ -333,10 +341,6 @@ struct mpp_strtab_index *mpp_strtab_index(struct mpp_strtab *tab) {
 
   for (int64_t i = 0; i < ix->str_list_len; i++) {
     struct mpp_strtab_el *el = ix->str_list[i];
-    // Retain one on the refcount for each element that was saved, so they can't
-    // be freed until we're done with them.
-    el->refcount++;
-
     // Insert it into the interned ptr table.
     int r = st_insert(ix->pos_table, (st_data_t)el->str, i);
     MPP_ASSERT_MSG(r == 0, "strtab: duplicate entry while building pos_table?");
