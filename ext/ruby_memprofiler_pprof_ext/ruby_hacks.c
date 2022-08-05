@@ -93,9 +93,15 @@ bool mpp_is_value_still_validish(VALUE obj) {
 // Peeks into internal GVL structures to spy if someone else is waiting for the GVL; we can
 // then be polite and yield it for them.
 bool mpp_is_someone_else_waiting_for_gvl() {
-  pthread_mutex_lock(&GET_VM()->gvl.lock);
-  bool someone_waiting = list_empty(&GET_VM()->gvl.waitq);
-  pthread_mutex_unlock(&GET_VM()->gvl.lock);
+  rb_global_vm_lock_t gvl;
+#ifdef HAVE_GET_RACTOR
+  gvl = GET_RACTOR()->threads.gvl;
+#else
+  gvl = GET_VM()->gvl;
+#endif
+  pthread_mutex_lock(&gvl.lock);
+  bool someone_waiting = list_empty(&gvl.waitq);
+  pthread_mutex_unlock(&gvl.lock);
   return someone_waiting;
 }
 

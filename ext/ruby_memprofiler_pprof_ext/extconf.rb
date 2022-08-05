@@ -106,6 +106,10 @@ checking_for checking_message("variable sized heap slots") do
   end
 end
 
+if have_macro("GET_RACTOR", [RUBY_MJIT_HEADER], &STRIP_RUBY_INCLUDE)
+  $defs << "-DHAVE_GET_RACTOR"
+end
+
 # Set our cflags up _only after_ we have run all the existence checks above; otherwise
 # stuff like -Werror can break the test programs.
 append_cflags([
