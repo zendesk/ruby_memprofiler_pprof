@@ -124,21 +124,53 @@ The `mpp_strtab_intern` methods take a string, and if the string is not in the t
 
 ## Benchmarks
 
-There's still a pretty significance performance overhead, but I'm working on it!
+There's a micro-benchmark in [`script/benchmark.rb`](script/benchmark.rb). On my M1 Macbook pro, using Ruby 3.1.2, I get these results:
 
 ```
-$ bundle exec ruby script/benchmark.rb
+% ruby script/benchmark.rb
                                            user     system      total        real
-no profiling (1)                      15.844936   0.469273  16.314209 ( 16.337021)
-no profiling (2)                      14.966771   0.034934  15.001705 ( 15.020942)
-with profiling (1%, no flush)         15.971306   0.477258  16.448564 ( 16.471195)
-with reporting (1%, with flush)       17.402173   0.029948  17.432121 ( 17.454925)
-with profiling (10%, no flush)        23.168302   0.289576  23.457878 ( 23.487329)
-with reporting (10%, with flush)      48.194583   0.042943  48.237526 ( 48.290087)
-with profiling (100%, no flush)       24.493680   0.329478  24.823158 ( 24.856144)
-with reporting (100%, with flush)     95.083065   0.099887  95.182952 ( 95.286911)
+no profiling (1)                      43.413046   0.648462  44.061508 ( 44.066837)
+no profiling (2)                      42.673967   0.484428  43.158395 ( 43.157883)
+with profiling (1%, no flush)         43.244823   0.500708  43.745531 ( 43.744254)
+with reporting (1%, with flush)       43.419615   0.507595  43.927210 ( 43.926428)
+with profiling (10%, no flush)        49.723410   0.561994  50.285404 ( 50.283753)
+with reporting (10%, with flush)      50.149807   0.586817  50.736624 ( 50.738648)
+with profiling (100%, no flush)       91.865782   0.815189  92.680971 ( 92.680902)
+with reporting (100%, with flush)     93.603299   0.890714  94.494013 ( 94.491310)
 ```
 
+And on Ruby 2.7.6, I get the following:
+
+```
+% ruby script/benchmark.rb
+                                           user     system      total        real
+no profiling (1)                      54.393508   0.560620  54.954128 ( 54.952601)
+no profiling (2)                      54.110870   0.592066  54.702936 ( 54.708036)
+with profiling (1%, no flush)         57.820971   0.473099  58.294070 ( 58.305322)
+with reporting (1%, with flush)       57.449118   0.396420  57.845538 ( 57.846939)
+with profiling (10%, no flush)        84.570894   0.467873  85.038767 ( 85.036562)
+with reporting (10%, with flush)      85.871023   0.461915  86.332938 ( 86.330259)
+with profiling (100%, no flush)      272.905430   1.203848 274.109278 (274.190640)
+with reporting (100%, with flush)    280.263849   1.262476 281.526325 (281.575339)
+```
+
+A few things of note:
+
+* In Ruby 3.1, at low sampling rates, the overhead is almost negligible in this benchmark!
+* The slowdown is quite a bit more significant in Ruby 2.7 compared to 3.1 (at 100% sampling, the slowdown is 160% in 3.1 but 418% in 2.7)
+* Ruby 2.7 is a good chunk slower in this benchmark all on it own, even without RMP enabled.
+
+I also deployed this into Zendesk's Rails monolith (running Ruby 2.7), at a 2% sampling rate, and measured the impact with Datadog's [Linux Profiler](https://docs.datadoghq.com/tracing/profiler/enabling/ddprof) (which is using Linux's `perf_events` framework). The result was a significant increase in request handling latency:
+
+![2% profiling had a huge impact on app latency](doc/images/app_latency.png)
+
+Using the profiler, we can measure where in RMP the slowdown comes from:
+
+![Profiler snapshot of Zendesk's Rails monolith with RMP enabled](doc/images/app_profile.png)
+
+* RMP itself is responsible for 34% of CPU usage for the process
+* Flushing is about 6%, the newobj hook is 15%, and the freeobj hook is 11%
+* A very large amount of the time spent in those hooks is interning & deinterning strings, hashing them and looking them up in the string intern table.
 
 ## Potential future improvements
 

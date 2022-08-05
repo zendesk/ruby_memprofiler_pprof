@@ -10,3 +10,5 @@ mkmf.log
 extconf.h
 .cache/
 compile_commands.json
+.DS_Store
+
