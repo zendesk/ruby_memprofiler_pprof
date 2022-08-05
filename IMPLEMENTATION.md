@@ -111,6 +111,16 @@ When this flag is set, RMP will, whilst traversing the live-object hash, periodi
 
 (You might ask, why not simply just call `rb_thread_schedule` unconditionally? We don't want to give up the CPU time of the application to any _other_ process if it turns out no other application threads want to run).
 
+## String interning
+
+When dealing with strings, like the names of methods or files, in the backtrace samples, RMP interns them into an internal string table. This is done for two reasons:
+
+* Firstly, the pprof format requires that strings are interned; all of the string fields in [pprof.proto](proto/pprof.proto) like `name`, `file_name`, etc are actually of type `int64`, which should be an index into the array `string_table`. So no matter what we did internally, we would need to produce such a table when emitting the pprof file.
+* Secondly, a lot of the strings in the profile are highly likely to be repeated a lot. There are only so many different filenames, method names, etc in a program; if we kept an independent copy of them for each sample in our live allocations map, we would quickly wind up using more memory than we're trying to trace!
+
+For this reason, we intern strings for samples when we get them out of backtracie. The `collector_cdata` struct has a single string interning table, `struct mpp_strtab *string_table`. The string table is implemented in [strtab.c](ext/ruby_memprofiler_pprof_ext/strtab.c) and provides two main families of methods - methods to add a string to the table, like `mpp_strtab_intern`, and ones to remove them, like `mpp_strtab_release`.
+
+The `mpp_strtab_intern` methods take a string, and if the string is not in the table, add it to the table. If the string is already in the table, its refcount is incremented. In both cases, a pointer to the internal string in the intern table is returned; this pointer can be compared to any other pointer returned from `mpp_strtab_intern` to know if it's the same string or not. The `mpp_strtab_release` methods do the opposite; they decrement the refcount of a string in the intern table, and if it was the last reference, free it.
 
 ## Benchmarks
 
