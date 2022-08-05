@@ -16,7 +16,14 @@ RMP is mostly implemented as a C extension (under `ext/ruby_memprofiler_pprof`),
 
 Ruby has a [documented(-ish)](https://ruby-doc.org/core-3.1.0/doc/extension_rdoc.html) [C API](https://silverhammermba.github.io/emberb/c/), which exposes some safe-ish operations to C extensions that remains _reasonably_ stable between Ruby versions. These are the functions that are exposed in the [ruby.h](https://github.com/ruby/ruby/blob/v3_1_2/include/ruby.h) C header file. However, some things this gem needs to do are not possible within the exposed API.
 
-To cheat, and get access to internal Ruby functions and structure definitions, RMP uses the [debase-ruby_core_source](https://github.com/os97673/debase-ruby_core_source) gem to pull in a copy of the private, internal C header files. This gives us access to function prototypes and structure definitions that would otherwise be inaccessible.
+To cheat, and get access to internal Ruby functions and structure definitions, RMP uses two tricks. First, it uses the internal MJIT header; this is an internal header file that Ruby ships with in order to allow code that is compiled with the MJIT just-in-time compiler to call back into the VM to do certain things. This is incoluded by requiring `ruby_mjit_min_header-#{RUBY_VERSION}.h"`.
+
+However, there are still some internal functions that are not exported in the MJIT header that we need access to - in particular, an implementation of the following two functions:
+
+  * `is_pointer_to_heap`, from `gc.c`, which says whether or not a given pointer points into the Ruby heap and so can be considered a `VALUE`.
+  * `rb_gc_disable_no_rest`, also from `gc.c`, which disables the garbage collector temporarily _without finishing the current collection_.
+
+To get access to these, we copy-paste rather large swathes of Ruby's internal structures in the `ruby_private/` directory for each version of Ruby we support; then, we implement copies of the above two methods which use those internal structures in `ruby_hacks.c`.
 
 It is the intention of this project, once it has gotten some real world usage and stabilised, to propose new APIs to Ruby upstream that could remove the need for this kind of hackery. For now, though, doing these tricks lets us get real world experience in real world apps using current mainline Rubies.
 
@@ -40,15 +47,72 @@ Unfortunately, it's tremendously, tremendously slow - mostly because it must all
 
 To solve these problems, we instead generate backtraces using the [Backtracie gem](https://github.com/ivoanjo/backtracie/).
 
-Backtracie collects backtraces in two stages. First, it constructs a [`raw_location`](https://github.com/ivoanjo/backtracie/blob/5cb1db0f09829166460e5a2851f000c87d158ffa/ext/backtracie_native_extension/ruby_shards.h#L117) struct capturing the nescessary data (e.g. iseq (instruction sequence) or cme (callable method entry) pointers, and self objects). This is done by directly reaching into VM private data structures - either also using `debase-ruby_core_source`, or with the MJIT private header, depending on the Ruby version. Then, it converts this raw data into a string backtrace representation in a seprate step.
+Backtracie is a rather special gem - as well as exposing a Ruby API that can be called from Ruby code, it _also_ exposes a low-level C API which allows other C extensions to call directly into its code. In this way, we can avoid the overhead of constantly calling into and out of Ruby to call methods from Backtracie. This C API is defined in the header [`public/backtracie.h`](https://github.com/ivoanjo/backtracie/blob/main/ext/backtracie_native_extension/public/backtracie.h), which we vendored in this project to avoid tricky build-time dependencies.
 
-One of the main motivations for the Backtracie project is to produce backtraces with much richer data than using Ruby's standard backtrace APIs (for example, including class names). This is good for ruby_memprofiler_pprof, but on its own, this wouldn't solve our performance problems. 
+Backtracie collects backtraces in two stages. Firstly, RMP calls [`backtracie_capture_frame_for_thread`](https://github.com/ivoanjo/backtracie/blob/main/ext/backtracie_native_extension/public/backtracie.h#L105), for each frame on the callstack, to capture a lightweight `raw_location` struct by directly reaching into VM private data structures. Then, for each frame, we stringify it into a stack-allocated C string by calling methods like `backtracie_frame_name_cstr` and `backtracie_frame_filename_cstr`. Importantly, these methods do _not_ do any Ruby string manipulation, nor do they do any memory allocation at all; this is essential for getting adequate performance, because calling back into the Ruby VM from within the tracepoint handler would be far too slow.
 
-We have (temporarily!) [forked Backtracie](https://github.com/KJTsanaktsidis/backtracie/tree/ktsanaktsidis/c_public_v2) to give it a C API which allows separating those two stages. In the `newobj` tracepoint handler, we do the "capturing" step, and keep only the `raw_location` structures around in the live sample map. Then, when producing the pprof profile during `#flush`, we do the second "stringifying" step. In this way, we only have to pay this cost for allocations which _actually_ live long enough to make it into a profile.
+Additionally, as a nice bonus, Backtracie is capable of producing much _nicer_ backtraces than the default Ruby backtrace generation; where Ruby often just prints a method name, Backtracie can produce a fully-qualified method name including the class i.e. `Foo::Thing#the_method` instead of just `the_method`.
 
-Our intention is to get that kind of API separation between collection/stringifying merged into Backtracie.
+## Keeping track of object liveness
 
-### Benchmarks
+In theory, what we need to do to generate profiles of retained, unfreed objects is fairly simple; when our newobj tracepoint hook is called, add the object into a hashmap (keyed by its VALUE), and when the freeobj hook is called, remove that VALUE from the hashmap. Unfortunately, it's not _quite_ that simple.
+
+### Sampling
+
+Firstly, There's the problem of sampling. As mentioned in the main documentation, RMP is designed to work by sampling N% of allocations, and building up a holistic picture of memory usage by combining profiles from multiple instances of your application. Ideally, we would simply skip over the newobj or freeobj tracepoint (100 - N)% of the time without doing any work at all; however, we always need to _look_ in the live object hashmap for the object in our freeobj hook, because we don't magically know _which_ N% of allocations made their way into that map.
+
+### Recursive hook non-execution
+
+Secondly, Ruby refuses to run newobj/freeobj hooks re-entrantly. If an object is allocated inside a newobj hook, the newobj hook [will NOT be called recursively](https://github.com/ruby/ruby/blob/55c771c302f94f1d1d95bf41b42459b4d2d1c337/vm_trace.c#L401) on that object. If the newobj hook triggers a GC, and an object is therefore freed, the freeobj hook will NOT be called either.
+
+This means that any object we allocate inside the newobj hook won't be included in heap samples (slightly annoying, but not a dealbreaker), but also that we might miss the fact that an object is freed if GC is triggered in the newobj hook (huge problem; trashes the accuracy of our data). GC can be triggered even in the absence of allocating any Ruby objects, too (`ruby_xmalloc` can trigger it).
+
+So, to work around this, we disable GC during our newobj hook. The catch is, we can't quite do that by simply calling `rb_gc_disable`. That method actually [_completes_ any in-progress GC sweep](https://github.com/ruby/ruby/blob/87d8d25796df3865b5a0c9069c604e475a28027f/gc.c#L11461) before returning, which does exactly what we _don't_ want (it would cause objects to be freed whilst we're in a newobj tracepoint hook, thus causing their freeobj hooks to not fire. Ruby actually has a method `rb_gc_disable_no_rest` which does _not_ complete an in-progress GC sweep, however that method is not exposed to C extensions.
+
+We hacked around this by copying the private `rb_objspace` structure definition (for each Ruby version we support) into `ruby_private/`, and re-implementing `rb_gc_disable_no_rest` ourselves. The method itself is quite trivial; it just needs to flip the [`dont_gc` bit](https://github.com/ruby/ruby/blob/87d8d25796df3865b5a0c9069c604e475a28027f/gc.c#L731) on the `rb_objspace` struct.
+
+
+### rb_gc_force_recycle
+
+In Ruby versions < 3.1, there's an API `rb_gc_force_recycle`, which directly marks an object as freed without going through machinery like running freeobj tracepoint hooks. This is used in the standard library in a few places, and results in a situation where our newobj hook could be called twice for the same VALUE, without a freeobj for it in the interim.
+
+We can detect this by checking to see in our newobj hook whether or not the VALUE is already in the live object map. If so, treat that as a free of that VALUE first, and _then_ follow the new-object path. This is probably good enough, since most usages of `rb_gc_force_recycle` are to "free" otherwise very short lived objects, so it's very likely the VALUE will be re-used for another object pretty soon. So hopefully it won't distort the heap profiles too much.
+
+## Deferred size measurement
+
+As well as recording the fact that an object was allocated, we'd like to record the size of the allocation too. Ruby provides a method for this, `rb_obj_memsize_of()`, which will tell you the total size of the memory backing a given VALUE - both the size it occupies in the [Ruby heap](https://jemma.dev/blog/gc-compaction), as well as any other malloc'd memory reported for the object, e.g. as reported by a C extension thorugh it's `.dsize` callback.
+
+Unfortunately, we can't call `rb_obj_memsize_of` on an object in the newobj tracepoint, for two reasons:
+
+* That would only return the size of the object on the Ruby heap (i.e. for most Ruby versions, 40 bytes). The off-heap storage for e.g. a large array or string won't have actually been allocated yet at this point of constructing the Array or String.
+* On new Ruby versions >= 3.1 with variable-width allocations, `rb_obj_memsize_of` actually crashes when calling it on an object at this point of its lifecycle. I've observed this happening with `T_CLASS` objects, because their ivar tables (stored inside the variable-width part of the RVALUE) are not set up at this point. This is a similar problem to [this bug](https://bugs.ruby-lang.org/issues/18795).
+
+Thankfully, the "solution" here is pretty simple. We only need to record the size of the object whilst creating our profile pprof file anyway, so only measure it then. It actually turns into a bit of a non-issue, but I'm keeping the section here discussing the fact that `rb_obj_memsize_of` can't be used in a newobj tracepoint for documentation purposes.
+
+## UPB: C protobuf library
+
+The pprof format is a (gzipped) protocol buffers structured file; in order to produce one, RMP needs a library to do so. Whilst we _could_ use the Ruby protobuf library published by Google for this, that's not especially convenient to call from a C extension (plus, it would get in the way of releasing the GVL - see the next section).
+
+Instead, RMP embeds a copy of the [UPB protobuf library](https://github.com/protocolbuffers/upb). This is supposed to be a simple-to-embed implementation of protobuf which forms the core of other language protobuf implementations. We embed it into our gem (see [`extconf.rb`](ext/ruby_memprofiler_pprof/extconf.rb) for details) and use it to serialise the pprof data.
+
+The gzip serialisation is achieved by linking against zlib directly, which should be available on any system which has Ruby.
+
+## Releasing the GVL during flush
+
+Periodically, in order to actually get any useful data _out_ of the profiler, the user needs to call `MemprofilerPprof::Collector#flush` to construct a pprof-formatted file containing details about all currently-live memory allocations. This operation is reasonably heavyweight; it needs to traverse the live-object map, measure the size of all the Ruby objects in it with `rb_obj_memsize_of`, construct a protobuf representation of all of this, serialise it, and compress it with gzip (that's actually a requirement of the pprof specification). If this was done whilst the RMP extension was still holding the GVL, that would translate to a long pause for the application, which is obviously undesirable.
+
+To avoid this, RMP needs to do as much of the flush work as possible whilst not holding the GVL; whilst it _is_ holding the GVL, it needs to be very concious to not hold it for a long uninterrupted time, to avoid long application pauses. There are two kwargs parameters for `#flush` that control these two behaviours; `yield_gvl` and `proactively_yield_gvl`.
+
+When `yield_gvl` is specified, RMP will perform the work of serialising the protobuf representation and gzipping it without holding the GVL, by simply calling `rb_thread_call_without_gvl`. Whilst in this state, RMP must be careful not to call _any_ Ruby APIs - this restriction is OK for this phase of the flushing, because the UPB protobuf library itself obviously does not deal with any Ruby APIs.
+
+However, on its own, that's not enough. The process of iterating through the currently-live objects, measuring their size, and constructing the protobuf data that is to be serialised also takes quite a long time. This also, however, requires the GVL; otherwise, we might be iterating the live-objects hash whilst another thread is creating a new object and trying to append to the same hash (and, of course, `rb_obj_memsize_of` _also_ requires the GVL). We want to break up this work into chunks, and yield the GVL in between, so that this manifests as many shorter pauses rather than one very long pause. That is the purpose of the `proactively_yield_gvl` flag.
+
+When this flag is set, RMP will, whilst traversing the live-object hash, periodically check to see if any _other_ thread is waiting for the GVL. There's no Ruby API for this, but we implemented a `mpp_is_someone_else_waiting_for_gvl` method which works by, again, peeking into the internal GVL data structure to find out. If that turns out to be the case, we call `rb_thread_schedule` to give up the GVL and run a different thread.
+
+(You might ask, why not simply just call `rb_thread_schedule` unconditionally? We don't want to give up the CPU time of the application to any _other_ process if it turns out no other application threads want to run).
+
+
+## Benchmarks
 
 There's still a pretty significance performance overhead, but I'm working on it!
 
@@ -65,48 +129,7 @@ with profiling (100%, no flush)       24.493680   0.329478  24.823158 ( 24.85614
 with reporting (100%, with flush)     95.083065   0.099887  95.182952 ( 95.286911)
 ```
 
-## Keeping track of object liveness
 
-In theory, what we need to do to generate profiles of retained, unfreed objects is fairly simple; when our newobj tracepoint hook is called, add the object into a hashmap (keyed by its VALUE), and when the freeobj hook is called, remove that VALUE from the hashmap. Unfortunately, it's not _quite_ that simple.
+## Potential future improvements
 
-### Sampling
-
-Firstly, There's the problem of sampling. As mentioned in the main documentation, RMP is designed to work by sampling N% of allocations, and building up a holistic picture of memory usage by combining profiles from multiple instances of your application. Ideally, we would simply skip over the newobj or freeobj tracepoint (100 - N)% of the time without doing any work at all; however, we always need to _look_ in the live object hashmap for the object in our freeobj hook, because we don't magically know _which_ N% of allocations made their way into that map.
-
-### Recursive hook non-execution
-
-Secondly, Ruby refuses to run newobj/freeobj hooks re-entrantly. If an object is allocated inside a newobj hook, the newobj hook will NOT be called recursively on that object. If the newobj hook triggers a GC, and an object is therefore freed, the freeobj hook will NOT be called either.
-
-This means that any object we allocate inside the newobj hook won't be included in heap samples (slightly annoying, but not a dealbreaker), but also that we might miss the fact that an object is freed if GC is triggered in the newobj hook (huge problem; trashes the accuracy of our data). GC can be triggered even in the absence of allocating any Ruby objects, too (`ruby_xmalloc` can trigger it).
-
-So, to work around this, we disable GC during our newobj hook. The catch is, we can't quite do that by simply calling `rb_gc_disable`; that actually _completes_ any in-progress GC sweep before returning, which does exactly what we _don't_ want (causes objects to be freed whilst we're in a newobj tracepoint hook, thus causing their freeobj hooks to not fire). We hacked around this, for now, by directly flipping the `dont_gc` bit on the `rb_objspace` struct to temporarily disable (and then re-enable later) GC.
-
-### rb_gc_force_recycle
-
-In Ruby versions < 3.1, there's an API `rb_gc_force_recycle`, which directly marks an object as freed without going through machinery like running freeobj tracepoint hooks. This is used in the standard library in a few places, and results in a situation where our newobj hook could be called twice for the same VALUE, without a freeobj for it in the interim.
-
-We can detect this by checking to see in our newobj hook whether or not the VALUE is already in the live object map. If so, treat that as a free of that VALUE first, and _then_ follow the new-object path. This is probably good enough, since most usages of `rb_gc_force_recycle` are to "free" otherwise very short lived objects, so it's very likely the VALUE will be re-used for another object pretty soon. So hopefully it won't distort the heap profiles too much.
-
-## Deferred size measurement
-
-As well as recording the fact that an object was allocated, we'd like to record the size of the allocation too. Ruby provides a method for this, `rb_obj_memsize_of()`, which will tell you the total size of the memory backing a given VALUE - both the size it occupies in the [Ruby heap](https://jemma.dev/blog/gc-compaction), as well as any other malloc'd memory reported for the object, e.g. as reported by a C extension thorugh it's `.dsize` callback.
-
-Unfortunately, we can't call `rb_obj_memsize_of` on an object in the newobj tracepoint, for two reasons:
-
-* That would only return the size of the object on the Ruby heap (i.e. for most Ruby versions, 40 bytes). The off-heap storage for e.g. a large array or string won't have actually been allocated yet at this point of constructing the Array or String.
-* On new Ruby versions >= 3.1 with variable-width allocations, `rb_obj_memsize_of` actually crashes when calling it on an object at this point of its lifecycle. I've observed this happening with T_CLASS objects, because their ivar tables (stored inside the variable-width part of the RVALUE) are not set up at this point. This is a similar problem to [this bug](https://bugs.ruby-lang.org/issues/18795).
-
-Thankfully, the "solution" here is pretty simple. We only need to record the size of the object whilst creating our profile pprof file anyway, so only measure it then. It actually turns into a bit of a non-issue, but I'm keeping the section here discussing the fact that `rb_obj_memsize_of` can't be used in a newobj tracepoint for documentation purposes.
-
-## UPB: C protobuf library
-
-Constructing the pprof-formatted profile from the internal representation (i.e. what the `MemprofilerPprof::Collector#flush` method does) could take a decently long time (depending on how much data there is; I haven't really benchmarked this yet). It would be nice if we could release the Ruby GVL (global value lock) during this time, so that other threads could execute Ruby code while this is happening. In order to make this possible, that flush process can't call any Ruby methods (it's illegal to do so without holding the GVL).
-
-(N.b. - I haven't actually _implemented_ releasing the GVL in `#flush`, but I wanted to make sure it was possible)
-
-There are two things that the flush method does for which one would normally reach for a gem - serializing the profile data to protobuf, and compressing the profile with gzip (it's mandatory to do so according to the pprof file spec). Instead, we need to use C libraries to do these things, without calling back into Ruby.
-
-To achieve the protobuf serialization entirely in C, RMP embeds a copy of the [UPB protobuf library](https://github.com/protocolbuffers/upb). This is supposed to be a simple-to-embed implementation of protobuf which forms the core of other language protobuf implementations. In any case, it's simple enough to embed it into our gem (see [`extconf.rb`](ext/ruby_memprofiler_pprof/extconf.rb) for details) and use it to serialise the pprof data.
-
-The gzip serialisation is achieved by linking against zlib directly, which should be available on any system which has Ruby.
-
+* Use a flag on the VALUE to avoid a lookup in freeobj. G
