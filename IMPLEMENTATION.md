@@ -12,7 +12,7 @@ Thus, in each profile, you see what codepaths allocated memory (since profiling 
 
 ## C extension implementation
 
-RMP is mostly implemented as a C extension (under `ext/ruby_memprofiler_pprof`), because what it does involves calling undocumented APIs not exposed to Ruby code. When installing the gem, the C extension is compiled, and when executing `require "ruby_memprofiler_pprof"`, the compiled shared object is loaded into your program.
+RMP is mostly implemented as a C extension (under `ext/ruby_memprofiler_pprof_ext`), because what it does involves calling undocumented APIs not exposed to Ruby code. When installing the gem, the C extension is compiled, and when executing `require "ruby_memprofiler_pprof"`, the compiled shared object is loaded into your program.
 
 Ruby has a [documented(-ish)](https://ruby-doc.org/core-3.1.0/doc/extension_rdoc.html) [C API](https://silverhammermba.github.io/emberb/c/), which exposes some safe-ish operations to C extensions that remains _reasonably_ stable between Ruby versions. These are the functions that are exposed in the [ruby.h](https://github.com/ruby/ruby/blob/v3_1_2/include/ruby.h) C header file. However, some things this gem needs to do are not possible within the exposed API.
 
@@ -23,7 +23,7 @@ However, there are still some internal functions that are not exported in the MJ
   * `is_pointer_to_heap`, from `gc.c`, which says whether or not a given pointer points into the Ruby heap and so can be considered a `VALUE`.
   * `rb_gc_disable_no_rest`, also from `gc.c`, which disables the garbage collector temporarily _without finishing the current collection_.
 
-To get access to these, we copy-paste rather large swathes of Ruby's internal structures in the `ruby_private/` directory for each version of Ruby we support; then, we implement copies of the above two methods which use those internal structures in `ruby_hacks.c`.
+To get access to these, we copy-paste rather large swathes of Ruby's internal structures in the [`ruby_private/`](ext/ruby_memprofiler_pprof_ext/ruby_private/) directory for each version of Ruby we support; then, we implement copies of the above two methods which use those internal structures in [`ruby_hacks.c`](ext/ruby_memprofiler_pprof_ext/ruby_hacks.c)
 
 It is the intention of this project, once it has gotten some real world usage and stabilised, to propose new APIs to Ruby upstream that could remove the need for this kind of hackery. For now, though, doing these tricks lets us get real world experience in real world apps using current mainline Rubies.
 
@@ -93,7 +93,7 @@ Thankfully, the "solution" here is pretty simple. We only need to record the siz
 
 The pprof format is a (gzipped) protocol buffers structured file; in order to produce one, RMP needs a library to do so. Whilst we _could_ use the Ruby protobuf library published by Google for this, that's not especially convenient to call from a C extension (plus, it would get in the way of releasing the GVL - see the next section).
 
-Instead, RMP embeds a copy of the [UPB protobuf library](https://github.com/protocolbuffers/upb). This is supposed to be a simple-to-embed implementation of protobuf which forms the core of other language protobuf implementations. We embed it into our gem (see [`extconf.rb`](ext/ruby_memprofiler_pprof/extconf.rb) for details) and use it to serialise the pprof data.
+Instead, RMP embeds a copy of the [UPB protobuf library](https://github.com/protocolbuffers/upb). This is supposed to be a simple-to-embed implementation of protobuf which forms the core of other language protobuf implementations. We embed it into our gem (see [`extconf.rb`](ext/ruby_memprofiler_pprof_ext/extconf.rb) for details) and use it to serialise the pprof data.
 
 The gzip serialisation is achieved by linking against zlib directly, which should be available on any system which has Ruby.
 
