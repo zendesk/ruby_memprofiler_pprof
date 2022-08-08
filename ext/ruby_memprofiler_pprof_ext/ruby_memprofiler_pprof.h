@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#include <backtracie.h>
 #include <ruby.h>
 
 // UPB header files trip up a BUNCH of -Wshorten-64-to-32
@@ -220,30 +221,22 @@ void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *c
 
 // The struct mpp_sample is the core type for the data collected by ruby_memprofiler_pprof.
 
-struct mpp_backtrace_frame {
-  // These strings are interned in the strtab.
-  const char *function_name;
-  size_t function_name_len;
-  const char *file_name;
-  size_t file_name_len;
-  int line_number;
-};
-
 struct mpp_sample {
   // VALUE of the sampled object that was allocated, or Qundef it it's freed.
   VALUE allocated_value_weak;
   size_t allocated_value_objsize;
   size_t frames_count;
   size_t frames_capacity;
-  struct mpp_backtrace_frame frames[];
+  raw_location frames[];
 };
 
-// Captures a backtrace for a sample using Backtracie, interning the given strings.
-struct mpp_sample *mpp_sample_capture(struct mpp_strtab *strtab, VALUE allocated_value_weak, bool pretty);
+// Captures a backtrace for a sample using Backtracie. It writes all VALUES which need to be retained into the
+// mark_table, incrementing the refcount in there if applicable.
+struct mpp_sample *mpp_sample_capture(st_table *mark_table, VALUE allocated_value_weak, bool pretty);
 // Total size of all things owned by the sample, for accounting purposes
 size_t mpp_sample_memsize(struct mpp_sample *sample);
-// free the sample, including decrementing the refcount on any strings in the backtrace frames.
-void mpp_sample_free(struct mpp_sample *sample, struct mpp_strtab *strtab);
+// free the sample, including decrementing the refcount the mark_table.
+void mpp_sample_free(struct mpp_sample *sample, st_table *mark_table);
 
 // ======== PROTO SERIALIZATION ROUTINES ========
 struct mpp_pprof_serctx {

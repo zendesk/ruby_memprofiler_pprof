@@ -46,6 +46,13 @@ struct collector_cdata {
   // Number of samples dropped for want of space in the heap allocation table.
   size_t dropped_samples_heap_bufsize;
 
+  // Mark memoizer table. This table is a map of VALUE -> refcount, which represents VALUES
+  // contained within *heap_samples. The idea is that, during a GC mark cycle, we don't want
+  // to go and mark every object in *heap_samples; a lot of the same iseq's/callable_method_entries
+  // and friends will wind up in there.
+  // Instead, we use this map to only mark each distinct item once.
+  st_table *mark_table;
+
   // String interning table used to keep constant pointers to every string; this saves memory
   // used in backtraces, and also helps us efficiently build up the pprof protobuf format (since that
   // _requires_ that strings are interned in a string table).
@@ -168,6 +175,7 @@ static VALUE collector_alloc(VALUE klass) {
   cd->heap_samples_count = 0;
   cd->max_heap_samples = 0;
   cd->dropped_samples_heap_bufsize = 0;
+  cd->mark_table = NULL;
   cd->string_table = NULL;
   return v;
 }
@@ -205,6 +213,7 @@ static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
   cd->string_table = mpp_strtab_new();
   cd->heap_samples = st_init_numtable();
   cd->heap_samples_count = 0;
+  cd->mark_table = st_init_numtable();
 
   return Qnil;
 }
@@ -234,6 +243,9 @@ static void collector_gc_free(void *ptr) {
   if (cd->string_table) {
     mpp_strtab_destroy(cd->string_table);
   }
+  if (cd->mark_table) {
+    st_free_table(cd->mark_table);
+  }
 
   ruby_xfree(ptr);
 }
@@ -249,7 +261,7 @@ static void collector_gc_free_heap_samples(struct collector_cdata *cd) {
 static int collector_gc_free_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
   struct mpp_sample *sample = (struct mpp_sample *)value;
   struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
-  mpp_sample_free(sample, cd->string_table);
+  mpp_sample_free(sample, cd->mark_table);
   return ST_DELETE;
 }
 
@@ -309,7 +321,7 @@ static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VAL
   struct mpp_sample *sample;
   if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
     // We deleted it out of live objects; free the sample
-    mpp_sample_free(sample, cd->string_table);
+    mpp_sample_free(sample, cd->mark_table);
     cd->heap_samples_count--;
   }
 }
@@ -376,7 +388,8 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 #endif
 
   // OK, now it's time to add to our sample buffer.
-  struct mpp_sample *sample = mpp_sample_capture(cd->string_table, newobj, cd->pretty_backtraces);
+  struct mpp_sample *sample = mpp_sample_capture(cd->mark_table, newobj, cd->pretty_backtraces);
+>>>>>>> Stashed changes
   // insert into live sample map
   int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);
   MPP_ASSERT_MSG(alread_existed == 0, "st_insert did an update in the newobj hook");
@@ -512,7 +525,7 @@ int flush_each_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
   VALUE gc_was_already_disabled = mpp_rb_gc_disable_no_rest();
 
   if (!mpp_is_value_still_validish(sample->allocated_value_weak)) {
-    mpp_sample_free(sample, cd->string_table);
+    mpp_sample_free(sample, cd->mark_table);
     cd->heap_samples_count--;
     ret = ST_DELETE;
   } else {
