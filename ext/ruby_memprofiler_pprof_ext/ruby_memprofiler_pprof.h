@@ -239,7 +239,7 @@ struct mpp_sample {
 };
 
 // Captures a backtrace for a sample using Backtracie, interning the given strings.
-struct mpp_sample *mpp_sample_capture(struct mpp_strtab *strtab, VALUE allocated_value_weak);
+struct mpp_sample *mpp_sample_capture(struct mpp_strtab *strtab, VALUE allocated_value_weak, bool pretty);
 // Total size of all things owned by the sample, for accounting purposes
 size_t mpp_sample_memsize(struct mpp_sample *sample);
 // free the sample, including decrementing the refcount on any strings in the backtrace frames.

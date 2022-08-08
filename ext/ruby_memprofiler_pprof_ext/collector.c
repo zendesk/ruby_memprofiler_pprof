@@ -29,6 +29,8 @@ struct collector_cdata {
   // If we're flushing, this contains the thread that's doing the flushing. This is used
   // to exclude allocations from that thread from heap profiling.
   VALUE flush_thread;
+  // Whether or not to use pretty backtraces (true) or fast ones (false)
+  bool pretty_backtraces;
 
   // ======== Heap samples ========
   // A hash-table keying live VALUEs to their struct mpp_sample. This is _not_ cleared
@@ -108,6 +110,8 @@ static VALUE collector_get_sample_rate(VALUE self);
 static VALUE collector_set_sample_rate(VALUE self, VALUE newval);
 static VALUE collector_get_max_heap_samples(VALUE self);
 static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval);
+static VALUE collector_get_pretty_backtraces(VALUE self);
+static VALUE collector_set_pretty_backtraces(VALUE self, VALUE newval);
 
 static const rb_data_type_t collector_cdata_type = {"collector_cdata",
                                                     {
@@ -134,6 +138,8 @@ void mpp_setup_collector_class() {
   rb_define_method(cCollector, "sample_rate=", collector_set_sample_rate, 1);
   rb_define_method(cCollector, "max_heap_samples", collector_get_max_heap_samples, 0);
   rb_define_method(cCollector, "max_heap_samples=", collector_set_max_heap_samples, 1);
+  rb_define_method(cCollector, "pretty_backtraces", collector_get_pretty_backtraces, 0);
+  rb_define_method(cCollector, "pretty_backtraces=", collector_set_pretty_backtraces, 1);
   rb_define_method(cCollector, "running?", collector_is_running, 0);
   rb_define_method(cCollector, "start!", collector_start, 0);
   rb_define_method(cCollector, "stop!", collector_stop, 0);
@@ -177,20 +183,24 @@ static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
   // Argument parsing
   VALUE kwargs_hash = Qnil;
   rb_scan_args_kw(RB_SCAN_ARGS_LAST_HASH_KEYWORDS, argc, argv, "00:", &kwargs_hash);
-  VALUE kwarg_values[2];
-  ID kwarg_ids[2];
+  VALUE kwarg_values[3];
+  ID kwarg_ids[3];
   kwarg_ids[0] = rb_intern("sample_rate");
   kwarg_ids[1] = rb_intern("max_heap_samples");
-  rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 2, kwarg_values);
+  kwarg_ids[2] = rb_intern("pretty_backtraces");
+  rb_get_kwargs(kwargs_hash, kwarg_ids, 0, 3, kwarg_values);
 
   // Default values...
   if (kwarg_values[0] == Qundef)
     kwarg_values[0] = DBL2NUM(0.01);
   if (kwarg_values[1] == Qundef)
     kwarg_values[1] = LONG2NUM(50000);
+  if (kwarg_values[2] == Qundef)
+    kwarg_values[2] = Qtrue;
 
   rb_funcall(self, rb_intern("sample_rate="), 1, kwarg_values[0]);
   rb_funcall(self, rb_intern("max_heap_samples="), 1, kwarg_values[1]);
+  rb_funcall(self, rb_intern("pretty_backtraces="), 1, kwarg_values[2]);
 
   cd->string_table = mpp_strtab_new();
   cd->heap_samples = st_init_numtable();
@@ -366,7 +376,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 #endif
 
   // OK, now it's time to add to our sample buffer.
-  struct mpp_sample *sample = mpp_sample_capture(cd->string_table, newobj);
+  struct mpp_sample *sample = mpp_sample_capture(cd->string_table, newobj, cd->pretty_backtraces);
   // insert into live sample map
   int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);
   MPP_ASSERT_MSG(alread_existed == 0, "st_insert did an update in the newobj hook");
@@ -646,5 +656,16 @@ static VALUE collector_get_max_heap_samples(VALUE self) {
 static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval) {
   struct collector_cdata *cd = collector_cdata_get(self);
   cd->max_heap_samples = NUM2SIZET(newval);
+  return newval;
+}
+
+static VALUE collector_get_pretty_backtraces(VALUE self) {
+  struct collector_cdata *cd = collector_cdata_get(self);
+  return cd->pretty_backtraces ? Qtrue : Qfalse;
+}
+
+static VALUE collector_set_pretty_backtraces(VALUE self, VALUE newval) {
+  struct collector_cdata *cd = collector_cdata_get(self);
+  cd->pretty_backtraces = RTEST(newval);
   return newval;
 }

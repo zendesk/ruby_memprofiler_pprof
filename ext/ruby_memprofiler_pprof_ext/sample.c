@@ -18,7 +18,7 @@ void mpp_sample_free(struct mpp_sample *sample, struct mpp_strtab *strtab) {
   mpp_free(sample);
 }
 
-struct mpp_sample *mpp_sample_capture(struct mpp_strtab *strtab, VALUE allocated_value_weak) {
+struct mpp_sample *mpp_sample_capture(struct mpp_strtab *strtab, VALUE allocated_value_weak, bool pretty) {
   VALUE thread = rb_thread_current();
   int stack_size = backtracie_frame_count_for_thread(thread);
   struct mpp_sample *sample = mpp_xmalloc(sizeof(struct mpp_sample) + stack_size * sizeof(struct mpp_backtrace_frame));
