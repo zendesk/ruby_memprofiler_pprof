@@ -10,6 +10,7 @@
 
 #include <backtracie.h>
 
+#include "ruby/st.h"
 #include "ruby_memprofiler_pprof.h"
 
 struct collector_cdata {
@@ -45,24 +46,13 @@ struct collector_cdata {
   // ======== Sample drop counters ========
   // Number of samples dropped for want of space in the heap allocation table.
   size_t dropped_samples_heap_bufsize;
-
-  // Mark memoizer table. This table is a map of VALUE -> refcount, which represents VALUES
-  // contained within *heap_samples. The idea is that, during a GC mark cycle, we don't want
-  // to go and mark every object in *heap_samples; a lot of the same iseq's/callable_method_entries
-  // and friends will wind up in there.
-  // Instead, we use this map to only mark each distinct item once.
-  st_table *mark_table;
-
-  // String interning table used to keep constant pointers to every string; this saves memory
-  // used in backtraces, and also helps us efficiently build up the pprof protobuf format (since that
-  // _requires_ that strings are interned in a string table).
-  struct mpp_strtab *string_table;
 };
 
 static struct collector_cdata *collector_cdata_get(VALUE self);
 static VALUE collector_alloc(VALUE klass);
 static VALUE collector_initialize(int argc, VALUE *argv, VALUE self);
 static void collector_cdata_gc_mark(void *ptr);
+static int collector_gc_mark_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
 static void collector_gc_free(void *ptr);
 static void collector_gc_free_heap_samples(struct collector_cdata *cd);
 static int collector_gc_free_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
@@ -175,8 +165,6 @@ static VALUE collector_alloc(VALUE klass) {
   cd->heap_samples_count = 0;
   cd->max_heap_samples = 0;
   cd->dropped_samples_heap_bufsize = 0;
-  cd->mark_table = NULL;
-  cd->string_table = NULL;
   return v;
 }
 
@@ -210,10 +198,8 @@ static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
   rb_funcall(self, rb_intern("max_heap_samples="), 1, kwarg_values[1]);
   rb_funcall(self, rb_intern("pretty_backtraces="), 1, kwarg_values[2]);
 
-  cd->string_table = mpp_strtab_new();
   cd->heap_samples = st_init_numtable();
   cd->heap_samples_count = 0;
-  cd->mark_table = st_init_numtable();
 
   return Qnil;
 }
@@ -226,6 +212,24 @@ static void collector_cdata_gc_mark(void *ptr) {
   rb_gc_mark_movable(cd->cCollector);
   rb_gc_mark_movable(cd->cProfileData);
   rb_gc_mark_movable(cd->flush_thread);
+  st_foreach(cd->heap_samples, collector_gc_mark_each_heap_sample, 0);
+}
+
+static int collector_gc_mark_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
+  struct mpp_sample *sample = (struct mpp_sample *)value;
+  for (size_t i = 0; i < sample->frames_count; i++) {
+    raw_location frame = sample->frames[i];
+    if (RTEST(frame.iseq)) {
+      rb_gc_mark_movable(frame.iseq);
+    }
+    if (RTEST(frame.callable_method_entry)) {
+      rb_gc_mark_movable(frame.callable_method_entry);
+    }
+    if (RTEST(frame.self_or_self_class)) {
+      rb_gc_mark_movable(frame.self_or_self_class);
+    }
+  }
+  return ST_CONTINUE;
 }
 
 static void collector_gc_free(void *ptr) {
@@ -240,13 +244,6 @@ static void collector_gc_free(void *ptr) {
   }
 
   collector_gc_free_heap_samples(cd);
-  if (cd->string_table) {
-    mpp_strtab_destroy(cd->string_table);
-  }
-  if (cd->mark_table) {
-    st_free_table(cd->mark_table);
-  }
-
   ruby_xfree(ptr);
 }
 
@@ -260,8 +257,7 @@ static void collector_gc_free_heap_samples(struct collector_cdata *cd) {
 
 static int collector_gc_free_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
   struct mpp_sample *sample = (struct mpp_sample *)value;
-  struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
-  mpp_sample_free(sample, cd->mark_table);
+  mpp_sample_free(sample);
   return ST_DELETE;
 }
 
@@ -271,9 +267,6 @@ static size_t collector_gc_memsize(const void *ptr) {
   if (cd->heap_samples) {
     st_foreach(cd->heap_samples, collector_gc_memsize_each_heap_sample, (st_data_t)&sz);
     sz += st_memsize(cd->heap_samples);
-  }
-  if (cd->string_table) {
-    sz += mpp_strtab_memsize(cd->string_table);
   }
 
   return sz;
@@ -305,6 +298,14 @@ static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st
   struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
   struct mpp_sample *sample = (struct mpp_sample *)value;
 
+  // Handle compaction of our sample
+  for (size_t i = 0; i < sample->frames_count; i++) {
+    raw_location *frame = &sample->frames[i];
+    frame->iseq = rb_gc_location(frame->iseq);
+    frame->callable_method_entry = rb_gc_location(frame->callable_method_entry);
+    frame->self_or_self_class = rb_gc_location(frame->self_or_self_class);
+  }
+
   // Handle compaction of our weak reference to the heap sample.
   if (rb_gc_location(sample->allocated_value_weak) == sample->allocated_value_weak) {
     return ST_CONTINUE;
@@ -321,7 +322,7 @@ static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VAL
   struct mpp_sample *sample;
   if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
     // We deleted it out of live objects; free the sample
-    mpp_sample_free(sample, cd->mark_table);
+    mpp_sample_free(sample);
     cd->heap_samples_count--;
   }
 }
@@ -388,8 +389,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 #endif
 
   // OK, now it's time to add to our sample buffer.
-  struct mpp_sample *sample = mpp_sample_capture(cd->mark_table, newobj, cd->pretty_backtraces);
->>>>>>> Stashed changes
+  struct mpp_sample *sample = mpp_sample_capture(newobj);
   // insert into live sample map
   int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);
   MPP_ASSERT_MSG(alread_existed == 0, "st_insert did an update in the newobj hook");
@@ -525,7 +525,7 @@ int flush_each_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
   VALUE gc_was_already_disabled = mpp_rb_gc_disable_no_rest();
 
   if (!mpp_is_value_still_validish(sample->allocated_value_weak)) {
-    mpp_sample_free(sample, cd->mark_table);
+    mpp_sample_free(sample);
     cd->heap_samples_count--;
     ret = ST_DELETE;
   } else {
@@ -559,7 +559,7 @@ static VALUE flush_protected(VALUE ctxarg) {
 
   // Begin setting up pprof serialisation.
   char errbuf[256];
-  ctx->serctx = mpp_pprof_serctx_new(cd->string_table, errbuf, sizeof(errbuf));
+  ctx->serctx = mpp_pprof_serctx_new(errbuf, sizeof(errbuf));
   if (!ctx->serctx) {
     rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof: setting up serialisation: %s", errbuf);
   }

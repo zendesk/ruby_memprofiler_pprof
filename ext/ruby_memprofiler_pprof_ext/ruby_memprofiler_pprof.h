@@ -109,114 +109,6 @@ bool mpp_is_someone_else_waiting_for_gvl();
 // Like rb_ivar_set, but ignore frozen status.
 VALUE mpp_rb_ivar_set_ignore_frozen(VALUE obj, ID key, VALUE value);
 
-// ======== STRBUILDER DECLARATIONS ========
-struct mpp_strbuilder {
-  char *original_buf;
-  char *curr_ptr;
-  size_t original_bufsize;
-  size_t attempted_size;
-};
-
-void mpp_strbuilder_append(struct mpp_strbuilder *str, const char *cat);
-void mpp_strbuilder_appendf(struct mpp_strbuilder *str, const char *fmt, ...);
-void mpp_strbuilder_append_value(struct mpp_strbuilder *str, VALUE val);
-VALUE mpp_strbuilder_to_value(struct mpp_strbuilder *str);
-void mpp_strbuilder_init(struct mpp_strbuilder *str, char *buf, size_t bufsize);
-
-// ======== STRTAB DECLARATIONS ========
-
-#define MPP_STRTAB_USE_STRLEN (-1)
-#define MPP_STRTAB_UNKNOWN_LITERAL "(unknown)"
-#define MPP_STRTAB_UNKNOWN_LITERAL_LEN ((int)strlen(MPP_STRTAB_UNKNOWN_LITERAL))
-
-// Specialisation of the st_hash for "strings with length".
-struct mpp_strtab_key {
-  const char *str; // Pointer to the string; n.b. it does NOT need a null-terminator
-  size_t str_len;  // Size of the string, not including any null terminator.
-};
-
-// I copied this magic number out of st.c from Ruby.
-#define FNV1_32A_INIT 0x811c9dc5
-
-struct mpp_strtab_el {
-  // Pointer to null-terminated string that has been interned
-  char *str;
-  // Length of str, NOT INCLUDING the null terminator
-  size_t str_len;
-  // Number of times this string has been interned. When the refcount drops to zero, the string
-  // is removed from the table and str is free'd.
-  uint64_t refcount;
-  // We cleverly keep the key _inside_ the value, so we don't need a separate bunch of malloc'd
-  // memory for each _key_ as well as each _value_.
-  struct mpp_strtab_key key;
-};
-
-// struct mpp_strtab is a string interning table; interning strings with one of the mpp_strtab_intern* methods
-// will return a C string which is guaranteed to be the same pointer as any other "equal" string that was interned.
-// Interning the same string multiple times bumps its refcount; a string can also be released (with the
-// mpp_strtab_release* methods) to decrement its refcount. When the refcount is zero, the string is freed from the
-// intering table.
-struct mpp_strtab {
-  // The actual table which contains a mapping of (string hash) -> (str_intern_tab_el *)
-  st_table *table;
-  // Number of entries in table.
-  int64_t table_count;
-  // (approximate) allocated size of the _entries_ in the st_table (but not the st_table
-  // itself).
-  size_t table_entry_size;
-  // Value of "" interned in the table.
-  const char *interned_empty_str;
-};
-
-// A mpp_strtab_index is a view on a strtab which assigns a number from zero to N for every string in the table.
-// Constructing a mpp_strtab_index (with mpp_strtab_index) adds one to the refcount on every string in the
-// table, and destroying the index subtracts from the refcount. This is needed because the pprof format requires
-// that strings be referred to by a zero-based index into a list of strings.
-struct mpp_strtab_index {
-  // The table this index is a part of and came from.
-  struct mpp_strtab *tab;
-  // The list & length of interned strings.
-  struct mpp_strtab_el **str_list;
-  int64_t str_list_len;
-  // This st_hash is used to convert already-interned pointers to index into str_list.
-  // It's a map of (uintptr_t) -> (int64_t)
-  st_table *pos_table;
-};
-
-// NOTE - there's better documentation of what these methods do in strtab.c itself.
-
-// Initializes a new, empty string intern table. This will allocate memory that remains owned by the strtab
-// module and saves it in tab. It also allocates memory for struct intern_tab itself.
-struct mpp_strtab *mpp_strtab_new();
-
-// Destroys a string intern table, including freeing the underlying memory used by tab, and freeing
-// the memory pointed to by tab itself.
-void mpp_strtab_destroy(struct mpp_strtab *tab);
-
-// Get the size of all memory used by the table
-size_t mpp_strtab_memsize(struct mpp_strtab *tab);
-
-// Intern new strings (or increment the refcount of already-interned ones)
-void mpp_strtab_intern(struct mpp_strtab *tab, const char *str, int str_len, const char **interned_str_out,
-                       size_t *interned_str_len_out);
-void mpp_strtab_intern_rbstr(struct mpp_strtab *tab, VALUE rbstr, const char **interned_str_out,
-                             size_t *interned_str_len_out);
-void mpp_strtab_intern_cstr(struct mpp_strtab *tab, const char *str, const char **interned_str_out,
-                            size_t *interned_str_len_out);
-void mpp_strtab_intern_strbuilder(struct mpp_strtab *tab, struct mpp_strbuilder *builder, const char **interned_str_out,
-                                  size_t *interned_str_len_out);
-// Decrement the refcount of elements in the intern table.
-void mpp_strtab_release(struct mpp_strtab *tab, const char *str, size_t str_len);
-void mpp_strtab_release_rbstr(struct mpp_strtab *tab, VALUE rbstr);
-
-// Methods for building a zero-based list of interned pointers, for building the final string table
-// in the pprof protobuf.
-struct mpp_strtab_index *mpp_strtab_index(struct mpp_strtab *tab);
-void mpp_strtab_index_destroy(struct mpp_strtab_index *ix);
-int64_t mpp_strtab_index_of(struct mpp_strtab_index *ix, const char *interned_ptr);
-typedef void (*mpp_strtab_each_fn)(int64_t el_ix, const char *interned_str, size_t interned_str_len, void *ctx);
-void mpp_strtab_each(struct mpp_strtab_index *ix, mpp_strtab_each_fn fn, void *ctx);
-
 // ======== SAMPLE DECLARATIONS ========
 
 // The struct mpp_sample is the core type for the data collected by ruby_memprofiler_pprof.
@@ -230,13 +122,21 @@ struct mpp_sample {
   raw_location frames[];
 };
 
-// Captures a backtrace for a sample using Backtracie. It writes all VALUES which need to be retained into the
-// mark_table, incrementing the refcount in there if applicable.
-struct mpp_sample *mpp_sample_capture(st_table *mark_table, VALUE allocated_value_weak, bool pretty);
+// Captures a backtrace for a sample using Backtracie. The resulting sample contains VALUES inside
+// the raw_location struct whcih need to be marked.
+struct mpp_sample *mpp_sample_capture(VALUE allocated_value_weak);
 // Total size of all things owned by the sample, for accounting purposes
 size_t mpp_sample_memsize(struct mpp_sample *sample);
-// free the sample, including decrementing the refcount the mark_table.
-void mpp_sample_free(struct mpp_sample *sample, st_table *mark_table);
+// free the sample
+void mpp_sample_free(struct mpp_sample *sample);
+// Fill in a provided buffer with the name of a frame.
+size_t mpp_sample_frame_function_name(struct mpp_sample *sample, int frame_index, char *outbuf, size_t outbuf_len);
+// Fill in a provided buffer with the filename of a frame
+size_t mpp_sample_frame_file_name(struct mpp_sample *sample, int frame_index, char *outbuf, size_t outbuf_len);
+// Get the line number of a frame.
+int mpp_sample_frame_line_number(struct mpp_sample *sample, int frame_index);
+// Get a unique-ish ID for a function in a frame, for use in the pprof construction
+unsigned long mpp_sample_frame_function_id(struct mpp_sample *sample, int frame_index);
 
 // ======== PROTO SERIALIZATION ROUTINES ========
 struct mpp_pprof_serctx {
@@ -245,31 +145,29 @@ struct mpp_pprof_serctx {
   // freed.
   upb_alloc allocator;
   upb_Arena *arena;
-  // String intern index; recall that holding this object does _not_ require that we have exclusive
-  // use of the underlying string intern table, so it's safe for us to use this in a separate thread.
-  struct mpp_strtab_index *string_intern_index;
   // Map of function ID -> function protobuf
   st_table *function_pbs;
   // Map of (function ID, line number) -> location protobufs
   st_table *location_pbs;
   // Counter for assigning location IDs
   uint64_t loc_counter;
+  // Map of (string, len) -> string table index
+  st_table *strings;
+  // Counter for assigning string table indexes.
+  int strings_counter;
   // The protobuf representation we are building up.
   perftools_profiles_Profile *profile_proto;
 
-  // We need to keep interned copies of some strings that will wind up in the protobuf output.
-  // This is so that we can put constant values like "allocations" and "count" into our pprof output
-  // (the pprof format requires these strings to be in the string table along with the rest of them)
-  const char *internstr_count;
-  const char *internstr_bytes;
-  const char *internstr_retained_objects;
-  const char *internstr_retained_size;
+  // A buffer which, if non-NULL, points into the upb arena and can be stolen for interning strings.
+  char *scratch_buffer;
+  size_t scratch_buffer_strlen;
+  size_t scratch_buffer_capa;
 
   // Toggle to interrupt (toggled from Ruby's GVL unblocking function)
   uint8_t interrupt;
 };
 
-struct mpp_pprof_serctx *mpp_pprof_serctx_new(struct mpp_strtab *strtab, char *errbuf, size_t errbuflen);
+struct mpp_pprof_serctx *mpp_pprof_serctx_new(char *errbuf, size_t errbuflen);
 void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx);
 int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf,
                                 size_t errbuflen);
