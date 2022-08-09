@@ -49,13 +49,17 @@ struct collector_cdata {
   // ======== Sample drop counters ========
   // Number of samples dropped for want of space in the heap allocation table.
   size_t dropped_samples_heap_bufsize;
+
+  // Table of (VALUE) -> (refcount) which is used to make sure we only mark the parts of our samples once, since many of
+  // the samples will hold references to the same iseq's etc.
+  st_table *mark_table;
 };
 
 static struct collector_cdata *collector_cdata_get(VALUE self);
 static VALUE collector_alloc(VALUE klass);
 static VALUE collector_initialize(int argc, VALUE *argv, VALUE self);
 static void collector_cdata_gc_mark(void *ptr);
-static int collector_gc_mark_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
+static int collector_gc_mark_each_table_entry(st_data_t key, st_data_t value, st_data_t ctxarg);
 static void collector_gc_free(void *ptr);
 static void collector_gc_free_heap_samples(struct collector_cdata *cd);
 static int collector_gc_free_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
@@ -63,6 +67,7 @@ static size_t collector_gc_memsize(const void *ptr);
 static int collector_gc_memsize_each_heap_sample(st_data_t key, st_data_t value, st_data_t arg);
 #ifdef HAVE_RB_GC_MARK_MOVABLE
 static void collector_cdata_gc_compact(void *ptr);
+static int collector_compact_each_table_entry(st_data_t key, st_data_t value, st_data_t ctxarg);
 static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
 #endif
 static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VALUE freed_obj);
@@ -113,6 +118,8 @@ static VALUE collector_get_max_heap_samples(VALUE self);
 static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval);
 static VALUE collector_get_pretty_backtraces(VALUE self);
 static VALUE collector_set_pretty_backtraces(VALUE self, VALUE newval);
+static void mark_table_refcount_inc(st_table *mark_table, VALUE key);
+static void mark_table_refcount_dec(st_table *mark_table, VALUE key);
 
 static const rb_data_type_t collector_cdata_type = {"collector_cdata",
                                                     {
@@ -170,6 +177,7 @@ static VALUE collector_alloc(VALUE klass) {
   cd->max_heap_samples = 0;
   cd->dropped_samples_heap_bufsize = 0;
   cd->current_flush_epoch = 0;
+  cd->mark_table = NULL;
   return v;
 }
 
@@ -206,6 +214,8 @@ static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
   cd->heap_samples = st_init_numtable();
   cd->heap_samples_count = 0;
 
+  cd->mark_table = st_init_numtable();
+
   return Qnil;
 }
 
@@ -217,23 +227,11 @@ static void collector_cdata_gc_mark(void *ptr) {
   rb_gc_mark_movable(cd->cCollector);
   rb_gc_mark_movable(cd->cProfileData);
   rb_gc_mark_movable(cd->flush_thread);
-  st_foreach(cd->heap_samples, collector_gc_mark_each_heap_sample, 0);
+  st_foreach(cd->mark_table, collector_gc_mark_each_table_entry, 0);
 }
 
-static int collector_gc_mark_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
-  struct mpp_sample *sample = (struct mpp_sample *)value;
-  for (size_t i = 0; i < sample->frames_count; i++) {
-    raw_location frame = sample->frames[i];
-    if (RTEST(frame.iseq)) {
-      rb_gc_mark_movable(frame.iseq);
-    }
-    if (RTEST(frame.callable_method_entry)) {
-      rb_gc_mark_movable(frame.callable_method_entry);
-    }
-    if (RTEST(frame.self_or_self_class)) {
-      rb_gc_mark_movable(frame.self_or_self_class);
-    }
-  }
+static int collector_gc_mark_each_table_entry(st_data_t key, st_data_t value, st_data_t ctxarg) {
+  rb_gc_mark_movable((VALUE)key);
   return ST_CONTINUE;
 }
 
@@ -297,19 +295,34 @@ static void collector_cdata_gc_compact(void *ptr) {
 
   // Keep track of allocated objects we sampled that might move.
   st_foreach(cd->heap_samples, collector_compact_each_heap_sample, (st_data_t)cd);
+  st_foreach(cd->mark_table, collector_compact_each_table_entry, (st_data_t)cd);
+}
+
+static int collector_mark_table_add_refcount_update(st_data_t *key, st_data_t *value, st_data_t ctxarg, int existing) {
+  if (existing) {
+    *value += ctxarg;
+  } else {
+    *value = ctxarg;
+  }
+  return ST_CONTINUE;
+}
+
+static int collector_compact_each_table_entry(st_data_t key, st_data_t value, st_data_t ctxarg) {
+  struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
+  VALUE key_value = (VALUE)key;
+  VALUE new_value = rb_gc_location(key_value);
+  if (new_value == key_value) {
+    return ST_CONTINUE;
+  } else {
+    // Insert a new netry for the moved value, or add this items refcount to the existing entry.
+    st_update(cd->mark_table, new_value, collector_mark_table_add_refcount_update, value);
+    return ST_DELETE;
+  }
 }
 
 static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
   struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
   struct mpp_sample *sample = (struct mpp_sample *)value;
-
-  // Handle compaction of our sample
-  for (size_t i = 0; i < sample->frames_count; i++) {
-    raw_location *frame = &sample->frames[i];
-    frame->iseq = rb_gc_location(frame->iseq);
-    frame->callable_method_entry = rb_gc_location(frame->callable_method_entry);
-    frame->self_or_self_class = rb_gc_location(frame->self_or_self_class);
-  }
 
   // Handle compaction of our weak reference to the heap sample.
   if (rb_gc_location(sample->allocated_value_weak) == sample->allocated_value_weak) {
@@ -326,10 +339,38 @@ static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st
 static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VALUE freed_obj) {
   struct mpp_sample *sample;
   if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
+    for (size_t i = 0; i < sample->frames_count; i++) {
+      mark_table_refcount_dec(cd->mark_table, sample->frames[i].iseq);
+      mark_table_refcount_dec(cd->mark_table, sample->frames[i].callable_method_entry);
+      mark_table_refcount_dec(cd->mark_table, sample->frames[i].self_or_self_class);
+    }
+
     // We deleted it out of live objects; free the sample
     mpp_sample_free(sample);
     cd->heap_samples_count--;
   }
+}
+
+static int mark_table_refcount_update(st_data_t *key, st_data_t *value, st_data_t ctxarg, int existing) {
+  if (existing) {
+    *value += ((int)ctxarg);
+  } else {
+    *value = ((int)ctxarg);
+  }
+  return *value == 0 ? ST_DELETE : ST_CONTINUE;
+}
+
+static void mark_table_refcount_inc(st_table *mark_table, VALUE key) {
+  if (key == Qnil || key == Qundef) {
+    return;
+  }
+  st_update(mark_table, key, mark_table_refcount_update, 1);
+}
+static void mark_table_refcount_dec(st_table *mark_table, VALUE key) {
+  if (key == Qnil || key == Qundef) {
+    return;
+  }
+  st_update(mark_table, key, mark_table_refcount_update, (st_data_t)-1);
 }
 
 static void collector_tphook_newobj(VALUE tpval, void *data) {
@@ -401,6 +442,12 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
   MPP_ASSERT_MSG(alread_existed == 0, "st_insert did an update in the newobj hook");
   cd->heap_samples_count++;
 
+  // Add them to the list of things we will GC mark
+  for (size_t i = 0; i < sample->frames_count; i++) {
+    mark_table_refcount_inc(cd->mark_table, sample->frames[i].iseq);
+    mark_table_refcount_inc(cd->mark_table, sample->frames[i].callable_method_entry);
+    mark_table_refcount_inc(cd->mark_table, sample->frames[i].self_or_self_class);
+  }
 out:
   if (!RTEST(gc_was_already_disabled)) {
     rb_gc_enable();
