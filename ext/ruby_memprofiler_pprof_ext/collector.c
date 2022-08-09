@@ -53,6 +53,9 @@ struct collector_cdata {
   // Table of (VALUE) -> (refcount) which is used to make sure we only mark the parts of our samples once, since many of
   // the samples will hold references to the same iseq's etc.
   st_table *mark_table;
+
+  // Debugging counters
+  int64_t last_gc_mark_ns;
 };
 
 static struct collector_cdata *collector_cdata_get(VALUE self);
@@ -118,6 +121,7 @@ static VALUE collector_get_max_heap_samples(VALUE self);
 static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval);
 static VALUE collector_get_pretty_backtraces(VALUE self);
 static VALUE collector_set_pretty_backtraces(VALUE self, VALUE newval);
+static VALUE collector_get_last_mark_nsecs(VALUE self);
 static void mark_table_refcount_inc(st_table *mark_table, VALUE key);
 static void mark_table_refcount_dec(st_table *mark_table, VALUE key);
 
@@ -154,6 +158,7 @@ void mpp_setup_collector_class() {
   rb_define_method(cCollector, "flush", collector_flush, -1);
   rb_define_method(cCollector, "profile", collector_profile, 0);
   rb_define_method(cCollector, "live_heap_samples_count", collector_live_heap_samples_count, 0);
+  rb_define_method(cCollector, "last_mark_nsecs", collector_get_last_mark_nsecs, 0);
 }
 
 static struct collector_cdata *collector_cdata_get(VALUE self) {
@@ -178,6 +183,7 @@ static VALUE collector_alloc(VALUE klass) {
   cd->dropped_samples_heap_bufsize = 0;
   cd->current_flush_epoch = 0;
   cd->mark_table = NULL;
+  cd->last_gc_mark_ns = 0;
   return v;
 }
 
@@ -220,6 +226,8 @@ static VALUE collector_initialize(int argc, VALUE *argv, VALUE self) {
 }
 
 static void collector_cdata_gc_mark(void *ptr) {
+  struct timespec t1 = mpp_gettime_monotonic();
+
   struct collector_cdata *cd = (struct collector_cdata *)ptr;
   rb_gc_mark_movable(cd->newobj_trace);
   rb_gc_mark_movable(cd->freeobj_trace);
@@ -228,6 +236,9 @@ static void collector_cdata_gc_mark(void *ptr) {
   rb_gc_mark_movable(cd->cProfileData);
   rb_gc_mark_movable(cd->flush_thread);
   st_foreach(cd->mark_table, collector_gc_mark_each_table_entry, 0);
+
+  struct timespec t2 = mpp_gettime_monotonic();
+  cd->last_gc_mark_ns = mpp_time_delta_nsec(t1, t2);
 }
 
 static int collector_gc_mark_each_table_entry(st_data_t key, st_data_t value, st_data_t ctxarg) {
@@ -741,4 +752,9 @@ static VALUE collector_set_pretty_backtraces(VALUE self, VALUE newval) {
   struct collector_cdata *cd = collector_cdata_get(self);
   cd->pretty_backtraces = RTEST(newval);
   return newval;
+}
+
+static VALUE collector_get_last_mark_nsecs(VALUE self) {
+  struct collector_cdata *cd = collector_cdata_get(self);
+  return INT2NUM(cd->last_gc_mark_ns);
 }
