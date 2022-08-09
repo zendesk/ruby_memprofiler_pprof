@@ -42,6 +42,9 @@ struct collector_cdata {
   size_t heap_samples_count;
   // How big the sample table can grow
   size_t max_heap_samples;
+  // This number goes up by one every time #flush is called, and is used to keep _new_ samples from winding up in a
+  // profile we're in the process of flushing.
+  unsigned int current_flush_epoch;
 
   // ======== Sample drop counters ========
   // Number of samples dropped for want of space in the heap allocation table.
@@ -88,6 +91,7 @@ struct flush_each_sample_ctx {
   int64_t nogvl_duration;
   int64_t gvl_yield_count;
   int64_t gvl_check_yield_count;
+  unsigned int flush_epoch;
 };
 int flush_each_sample(st_data_t key, st_data_t value, st_data_t ctxarg);
 struct flush_nogvl_ctx {
@@ -165,6 +169,7 @@ static VALUE collector_alloc(VALUE klass) {
   cd->heap_samples_count = 0;
   cd->max_heap_samples = 0;
   cd->dropped_samples_heap_bufsize = 0;
+  cd->current_flush_epoch = 0;
   return v;
 }
 
@@ -390,6 +395,7 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 
   // OK, now it's time to add to our sample buffer.
   struct mpp_sample *sample = mpp_sample_capture(newobj);
+  sample->flush_epoch = cd->current_flush_epoch;
   // insert into live sample map
   int alread_existed = st_insert(cd->heap_samples, newobj, (st_data_t)sample);
   MPP_ASSERT_MSG(alread_existed == 0, "st_insert did an update in the newobj hook");
@@ -520,6 +526,11 @@ int flush_each_sample(st_data_t key, st_data_t value, st_data_t ctxarg) {
   }
   ctx->i++;
 
+  if (sample->flush_epoch > ctx->flush_epoch) {
+    // This is a new sample captured since we started calling #flush; skip it.
+    return ST_CONTINUE;
+  }
+
   // Need to disable GC so that our freeobj tracepoint hook can't delete the sample out of the map
   // after we've decided we're _also_ going to delete the sample out of the map.
   VALUE gc_was_already_disabled = mpp_rb_gc_disable_no_rest();
@@ -553,6 +564,7 @@ static VALUE flush_protected(VALUE ctxarg) {
   struct collector_cdata *cd = ctx->cd;
   bool proactively_yield_gvl = ctx->proactively_yield_gvl;
   cd->flush_thread = rb_thread_current();
+  unsigned int flush_epoch = cd->current_flush_epoch++;
 
   size_t dropped_samples_bufsize = cd->dropped_samples_heap_bufsize;
   cd->dropped_samples_heap_bufsize = 0;
@@ -576,6 +588,7 @@ static VALUE flush_protected(VALUE ctxarg) {
   sample_ctx.nogvl_duration = 0;
   sample_ctx.gvl_yield_count = 0;
   sample_ctx.gvl_check_yield_count = 0;
+  sample_ctx.flush_epoch = flush_epoch;
   st_foreach(cd->heap_samples, flush_each_sample, (st_data_t)&sample_ctx);
   if (sample_ctx.r == -1) {
     rb_raise(rb_eRuntimeError, "ruby_memprofiler_pprof: failed preparing samples for serialisation: %s",

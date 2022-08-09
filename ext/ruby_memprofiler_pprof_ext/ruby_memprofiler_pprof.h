@@ -119,6 +119,7 @@ struct mpp_sample {
   size_t allocated_value_objsize;
   size_t frames_count;
   size_t frames_capacity;
+  unsigned int flush_epoch;
   raw_location frames[];
 };
 
