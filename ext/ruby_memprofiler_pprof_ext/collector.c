@@ -122,6 +122,7 @@ static VALUE collector_set_max_heap_samples(VALUE self, VALUE newval);
 static VALUE collector_get_pretty_backtraces(VALUE self);
 static VALUE collector_set_pretty_backtraces(VALUE self, VALUE newval);
 static VALUE collector_get_last_mark_nsecs(VALUE self);
+static VALUE collector_get_mark_table_size(VALUE self);
 static void mark_table_refcount_inc(st_table *mark_table, VALUE key);
 static void mark_table_refcount_dec(st_table *mark_table, VALUE key);
 
@@ -159,6 +160,7 @@ void mpp_setup_collector_class() {
   rb_define_method(cCollector, "profile", collector_profile, 0);
   rb_define_method(cCollector, "live_heap_samples_count", collector_live_heap_samples_count, 0);
   rb_define_method(cCollector, "last_mark_nsecs", collector_get_last_mark_nsecs, 0);
+  rb_define_method(cCollector, "mark_table_size", collector_get_mark_table_size, 0);
 }
 
 static struct collector_cdata *collector_cdata_get(VALUE self) {
@@ -309,13 +311,13 @@ static void collector_cdata_gc_compact(void *ptr) {
   st_foreach(cd->mark_table, collector_compact_each_table_entry, (st_data_t)cd);
 }
 
-static int collector_mark_table_add_refcount_update(st_data_t *key, st_data_t *value, st_data_t ctxarg, int existing) {
+static int mark_table_refcount_update(st_data_t *key, st_data_t *value, st_data_t ctxarg, int existing) {
   if (existing) {
-    *value += ctxarg;
+    *value += ((int)ctxarg);
   } else {
-    *value = ctxarg;
+    *value = ((int)ctxarg);
   }
-  return ST_CONTINUE;
+  return *value == 0 ? ST_DELETE : ST_CONTINUE;
 }
 
 static int collector_compact_each_table_entry(st_data_t key, st_data_t value, st_data_t ctxarg) {
@@ -326,7 +328,7 @@ static int collector_compact_each_table_entry(st_data_t key, st_data_t value, st
     return ST_CONTINUE;
   } else {
     // Insert a new netry for the moved value, or add this items refcount to the existing entry.
-    st_update(cd->mark_table, new_value, collector_mark_table_add_refcount_update, value);
+    st_update(cd->mark_table, new_value, mark_table_refcount_update, value);
     return ST_DELETE;
   }
 }
@@ -360,15 +362,6 @@ static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VAL
     mpp_sample_free(sample);
     cd->heap_samples_count--;
   }
-}
-
-static int mark_table_refcount_update(st_data_t *key, st_data_t *value, st_data_t ctxarg, int existing) {
-  if (existing) {
-    *value += ((int)ctxarg);
-  } else {
-    *value = ((int)ctxarg);
-  }
-  return *value == 0 ? ST_DELETE : ST_CONTINUE;
 }
 
 static void mark_table_refcount_inc(st_table *mark_table, VALUE key) {
@@ -757,4 +750,9 @@ static VALUE collector_set_pretty_backtraces(VALUE self, VALUE newval) {
 static VALUE collector_get_last_mark_nsecs(VALUE self) {
   struct collector_cdata *cd = collector_cdata_get(self);
   return INT2NUM(cd->last_gc_mark_ns);
+}
+
+static VALUE collector_get_mark_table_size(VALUE self) {
+  struct collector_cdata *cd = collector_cdata_get(self);
+  return UINT2NUM(cd->mark_table->num_entries);
 }
