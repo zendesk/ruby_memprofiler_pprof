@@ -100,7 +100,7 @@ bool mpp_is_someone_else_waiting_for_gvl() {
   gvl = GET_VM()->gvl;
 #endif
   pthread_mutex_lock(&gvl.lock);
-  bool someone_waiting = list_empty(&gvl.waitq);
+  bool someone_waiting = !list_empty(&gvl.waitq);
   pthread_mutex_unlock(&gvl.lock);
   return someone_waiting;
 }
