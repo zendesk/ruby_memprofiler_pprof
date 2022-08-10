@@ -337,6 +337,13 @@ static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st
   struct collector_cdata *cd = (struct collector_cdata *)ctxarg;
   struct mpp_sample *sample = (struct mpp_sample *)value;
 
+  for (size_t i = 0; i < sample->frames_count; i++) {
+    raw_location *frame = &sample->frames[i];
+    frame->iseq = rb_gc_location(frame->iseq);
+    frame->callable_method_entry = rb_gc_location(frame->callable_method_entry);
+    frame->self_or_self_class = rb_gc_location(frame->self_or_self_class);
+  }
+
   // Handle compaction of our weak reference to the heap sample.
   if (rb_gc_location(sample->allocated_value_weak) == sample->allocated_value_weak) {
     return ST_CONTINUE;
