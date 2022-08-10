@@ -177,4 +177,49 @@ raw_location *backtracie_frame_wrapper_frames(VALUE wrapper);
 BACKTRACIE_API
 int *backtracie_frame_wrapper_len(VALUE wrapper);
 
+typedef struct {
+  // 1 -> ruby frame / 0 -> cfunc frame
+  uint16_t is_ruby_frame : 1;
+  // What is in the method_quaalifier field?
+  // 0 -> rb_class_of(the VALUE the method was called on)
+  // 1 -> the VALUE the method was called on
+  // 2 -> the class that the callable_method_entry is defined on.
+  uint16_t method_qualifier_contents : 2;
+  // 1 means the "method name" union contains a CME method ID, 0 means it
+  // contains a frame base_label.
+  uint16_t has_cme_method_id : 1;
+  // 1 means iseq_type is populated
+  uint16_t has_iseq_type : 1;
+
+  // Comes from iseq->body->type; is an iseq_type enum.
+  uint16_t iseq_type;
+
+  // Line number - we calculate this at capture time because it's fast and thus
+  // we don't need to store the iseq.
+  uint32_t line_number;
+
+  union {
+    // Comes from callable_method_entry->def->original_id
+    ID cme_method_id;
+    // Comes from iseq->body->location.base_label
+    VALUE base_label;
+  } method_name;
+
+  // VALUE for the filename (abs), or Qnil
+  VALUE filename;
+
+  // See method_qualifier_contents flag.
+  VALUE method_qualifier;
+} minimal_location_t;
+
+BACKTRACIE_API
+bool backtracie_capture_minimal_frame_for_thread(VALUE thread, int frame_index,
+                                                 minimal_location_t *loc);
+
+BACKTRACIE_API
+size_t backtracie_minimal_frame_name_cstr(const minimal_location_t *loc,
+                                          char *buf, size_t buflen);
+BACKTRACIE_API
+size_t backtracie_minimal_filename_cstr(const minimal_location_t *loc,
+                                        char *buf, size_t buflen);
 #endif

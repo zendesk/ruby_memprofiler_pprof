@@ -120,7 +120,7 @@ struct mpp_sample {
   size_t frames_count;
   size_t frames_capacity;
   unsigned int flush_epoch;
-  raw_location frames[];
+  minimal_location_t frames[];
 };
 
 // Captures a backtrace for a sample using Backtracie. The resulting sample contains VALUES inside

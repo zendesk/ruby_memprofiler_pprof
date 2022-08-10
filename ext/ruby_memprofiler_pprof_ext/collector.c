@@ -338,10 +338,12 @@ static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st
   struct mpp_sample *sample = (struct mpp_sample *)value;
 
   for (size_t i = 0; i < sample->frames_count; i++) {
-    raw_location *frame = &sample->frames[i];
-    frame->iseq = rb_gc_location(frame->iseq);
-    frame->callable_method_entry = rb_gc_location(frame->callable_method_entry);
-    frame->self_or_self_class = rb_gc_location(frame->self_or_self_class);
+    minimal_location_t *frame = &sample->frames[i];
+    if (!frame->has_cme_method_id) {
+      frame->method_name.base_label = rb_gc_location(frame->method_name.base_label);
+    }
+    frame->method_qualifier = rb_gc_location(frame->method_qualifier);
+    frame->filename = rb_gc_location(frame->filename);
   }
 
   // Handle compaction of our weak reference to the heap sample.
@@ -360,9 +362,12 @@ static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VAL
   struct mpp_sample *sample;
   if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
     for (size_t i = 0; i < sample->frames_count; i++) {
-      mark_table_refcount_dec(cd->mark_table, sample->frames[i].iseq);
-      mark_table_refcount_dec(cd->mark_table, sample->frames[i].callable_method_entry);
-      mark_table_refcount_dec(cd->mark_table, sample->frames[i].self_or_self_class);
+      minimal_location_t *frame = &sample->frames[i];
+      if (!frame->has_cme_method_id) {
+        mark_table_refcount_dec(cd->mark_table, frame->method_name.base_label);
+      }
+      mark_table_refcount_dec(cd->mark_table, frame->method_qualifier);
+      mark_table_refcount_dec(cd->mark_table, frame->filename);
     }
 
     // We deleted it out of live objects; free the sample
@@ -372,13 +377,13 @@ static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VAL
 }
 
 static void mark_table_refcount_inc(st_table *mark_table, VALUE key) {
-  if (key == Qnil || key == Qundef) {
+  if (key == Qnil || key == Qundef || key == 0) {
     return;
   }
   st_update(mark_table, key, mark_table_refcount_update, 1);
 }
 static void mark_table_refcount_dec(st_table *mark_table, VALUE key) {
-  if (key == Qnil || key == Qundef) {
+  if (key == Qnil || key == Qundef || key == 0) {
     return;
   }
   st_update(mark_table, key, mark_table_refcount_update, (st_data_t)-1);
@@ -455,9 +460,12 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
 
   // Add them to the list of things we will GC mark
   for (size_t i = 0; i < sample->frames_count; i++) {
-    mark_table_refcount_inc(cd->mark_table, sample->frames[i].iseq);
-    mark_table_refcount_inc(cd->mark_table, sample->frames[i].callable_method_entry);
-    mark_table_refcount_inc(cd->mark_table, sample->frames[i].self_or_self_class);
+    minimal_location_t *frame = &sample->frames[i];
+    if (!frame->has_cme_method_id) {
+      mark_table_refcount_inc(cd->mark_table, frame->method_name.base_label);
+    }
+    mark_table_refcount_inc(cd->mark_table, frame->method_qualifier);
+    mark_table_refcount_inc(cd->mark_table, frame->filename);
   }
 out:
   if (!RTEST(gc_was_already_disabled)) {
