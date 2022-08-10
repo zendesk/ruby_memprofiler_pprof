@@ -136,8 +136,6 @@ size_t mpp_sample_frame_function_name(struct mpp_sample *sample, int frame_index
 size_t mpp_sample_frame_file_name(struct mpp_sample *sample, int frame_index, char *outbuf, size_t outbuf_len);
 // Get the line number of a frame.
 int mpp_sample_frame_line_number(struct mpp_sample *sample, int frame_index);
-// Get a unique-ish ID for a function in a frame, for use in the pprof construction
-unsigned long mpp_sample_frame_function_id(struct mpp_sample *sample, int frame_index);
 
 // ======== PROTO SERIALIZATION ROUTINES ========
 struct mpp_pprof_serctx {
@@ -150,8 +148,12 @@ struct mpp_pprof_serctx {
   st_table *function_pbs;
   // Map of (function ID, line number) -> location protobufs
   st_table *location_pbs;
+  // Map of (function name string ID, file name string ID) -> function ID
+  st_table *function_ids;
   // Counter for assigning location IDs
   uint64_t loc_counter;
+  // Counter for assigning function IDs
+  uint64_t function_id_counter;
   // Map of (string, len) -> string table index
   st_table *strings;
   // Counter for assigning string table indexes.

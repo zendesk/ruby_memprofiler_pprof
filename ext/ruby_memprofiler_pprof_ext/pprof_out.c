@@ -175,8 +175,10 @@ struct mpp_pprof_serctx *mpp_pprof_serctx_new(char *errbuf, size_t errbuflen) {
   ctx->profile_proto = perftools_profiles_Profile_new(ctx->arena);
   ctx->function_pbs = st_init_numtable();
   ctx->location_pbs = st_init_table(&intpair_st_hash_type);
+  ctx->function_ids = st_init_table(&intpair_st_hash_type);
   ctx->strings = st_init_table(&str_st_hash_type);
   ctx->loc_counter = 1;
+  ctx->function_id_counter = 1;
   ctx->strings_counter = 0;
   ctx->interrupt = 0;
   ctx->scratch_buffer = NULL;
@@ -209,6 +211,9 @@ void mpp_pprof_serctx_destroy(struct mpp_pprof_serctx *ctx) {
   }
   if (ctx->location_pbs) {
     st_free_table(ctx->location_pbs);
+  }
+  if (ctx->function_ids) {
+    st_free_table(ctx->function_ids);
   }
   if (ctx->strings) {
     st_free_table(ctx->strings);
@@ -274,6 +279,15 @@ static int mpp_pprof_serctx_add_location(st_data_t *key, st_data_t *value, st_da
   return ST_CONTINUE;
 }
 
+static int function_id_update_func(st_data_t *key, st_data_t *value, st_data_t arg, int existing) {
+  struct mpp_pprof_serctx_map_add_ctx *thunkctx = (struct mpp_pprof_serctx_map_add_ctx *)arg;
+  if (!existing) {
+    *value = thunkctx->ctx->function_id_counter++;
+  }
+  thunkctx->function_id = *value;
+  return ST_CONTINUE;
+}
+
 int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample *sample, char *errbuf,
                                 size_t errbuflen) {
   CHECK_IF_INTERRUPTED(return -1);
@@ -303,7 +317,13 @@ int mpp_pprof_serctx_add_sample(struct mpp_pprof_serctx *ctx, struct mpp_sample 
     thunkctx.file_name = intern_scratch_buffer(ctx);
 
     thunkctx.line_number = mpp_sample_frame_line_number(sample, i);
-    thunkctx.function_id = mpp_sample_frame_function_id(sample, i);
+
+    // Fill in the function ID; the key is the (function_name, file_name) interned string index pair.
+    // This means that two frames are the same function if they have the same name and the same filename.
+    uint64_t func_id_key[2] = {thunkctx.function_name, thunkctx.file_name};
+    st_update(ctx->function_ids, (st_data_t)&func_id_key, function_id_update_func, (st_data_t)&thunkctx);
+
+    // Fill in the function & location protobuf structures.
     st_update(ctx->function_pbs, thunkctx.function_id, mpp_pprof_serctx_add_function, (st_data_t)&thunkctx);
     if (thunkctx.is_error) {
       return -1;

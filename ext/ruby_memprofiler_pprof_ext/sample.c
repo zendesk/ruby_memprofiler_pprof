@@ -41,17 +41,3 @@ size_t mpp_sample_frame_file_name(struct mpp_sample *sample, int frame_index, ch
 int mpp_sample_frame_line_number(struct mpp_sample *sample, int frame_index) {
   return backtracie_frame_line_number(&sample->frames[frame_index]);
 }
-
-// We need  "function ID"; in a C program, this would be the memory address of the function. There isn't a
-// super-equivalent concept in a Ruby program. This is unfortunately needed as part of the pprof format.
-// Go with this implementation, for now...
-unsigned long mpp_sample_frame_function_id(struct mpp_sample *sample, int frame_index) {
-  raw_location *frame = &sample->frames[frame_index];
-  if (RTEST(frame->iseq)) {
-    return NUM2ULONG(rb_obj_id(frame->iseq));
-  } else if (RTEST(frame->callable_method_entry)) {
-    return NUM2ULONG(rb_obj_id(frame->callable_method_entry));
-  } else {
-    MPP_ASSERT_FAIL("Don't know how to make a function ID for this frame");
-  }
-}
