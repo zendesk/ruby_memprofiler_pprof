@@ -49,9 +49,17 @@ To solve these problems, we instead generate backtraces using the [Backtracie ge
 
 Backtracie is a rather special gem - as well as exposing a Ruby API that can be called from Ruby code, it _also_ exposes a low-level C API which allows other C extensions to call directly into its code. In this way, we can avoid the overhead of constantly calling into and out of Ruby to call methods from Backtracie. This C API is defined in the header [`public/backtracie.h`](https://github.com/ivoanjo/backtracie/blob/main/ext/backtracie_native_extension/public/backtracie.h), which we vendored in this project to avoid tricky build-time dependencies.
 
-Backtracie collects backtraces in two stages. Firstly, RMP calls [`backtracie_capture_frame_for_thread`](https://github.com/ivoanjo/backtracie/blob/main/ext/backtracie_native_extension/public/backtracie.h#L105), for each frame on the callstack, to capture a lightweight `raw_location` struct by directly reaching into VM private data structures. Then, for each frame, we stringify it into a stack-allocated C string by calling methods like `backtracie_frame_name_cstr` and `backtracie_frame_filename_cstr`. Importantly, these methods do _not_ do any Ruby string manipulation, nor do they do any memory allocation at all; this is essential for getting adequate performance, because calling back into the Ruby VM from within the tracepoint handler would be far too slow.
+Backtracie collects backtraces in two stages. Firstly, RMP calls [`backtracie_capture_minimal_frame_for_thread`](https://github.com/ivoanjo/backtracie/blob/main/ext/backtracie_native_extension/public/backtracie.h#L105), for each frame on the callstack, to capture a lightweight `minimal_location_t` struct by directly reaching into VM private data structures. This structure is stored for each frame in the backtrace in the live sample map. The `minimal_location_t` structure contains things like method name & class VALUEs; these need to be marked as part of GC cycle.
+
+Then, when constructing the pprof sample data in `#flush`, we stringify the backtrace by caling methods like `backtracie_minimal_frame_name_cstr`; these produce a C string representing the frame without doing any Ruby string manipulation. Avoiding Ruby string methods (which dynamically grow strings) turns out to significantly improve performance.
 
 Additionally, as a nice bonus, Backtracie is capable of producing much _nicer_ backtraces than the default Ruby backtrace generation; where Ruby often just prints a method name, Backtracie can produce a fully-qualified method name including the class i.e. `Foo::Thing#the_method` instead of just `the_method`.
+
+
+## The "mark table"
+The `minimal_location_t` structs captured by Backtracie contain references to classes and method labels. Many saved allocations will have substantially the same backtrace (e.g. the top frames will normally be exactly the same for every allocation in the program!). Thus, if we simply walked the live sample map, and individually marked the VALUEs in each `minimal_location_t`, we would be marking the same object over and over again.
+
+It turns out to be an order of magnitude faster to keep a refcounted table of VALUEs to be marked; when we capture a sample, we insert each VALUE it holds into the table (or, increase its refcount if it's already there), and do the opposite when the sample is freed. Then, during GC marking, we need only mark each such value _once_.
 
 ## Keeping track of object liveness
 
@@ -110,17 +118,6 @@ However, on its own, that's not enough. The process of iterating through the cur
 When this flag is set, RMP will, whilst traversing the live-object hash, periodically check to see if any _other_ thread is waiting for the GVL. There's no Ruby API for this, but we implemented a `mpp_is_someone_else_waiting_for_gvl` method which works by, again, peeking into the internal GVL data structure to find out. If that turns out to be the case, we call `rb_thread_schedule` to give up the GVL and run a different thread.
 
 (You might ask, why not simply just call `rb_thread_schedule` unconditionally? We don't want to give up the CPU time of the application to any _other_ process if it turns out no other application threads want to run).
-
-## String interning
-
-When dealing with strings, like the names of methods or files, in the backtrace samples, RMP interns them into an internal string table. This is done for two reasons:
-
-* Firstly, the pprof format requires that strings are interned; all of the string fields in [pprof.proto](proto/pprof.proto) like `name`, `file_name`, etc are actually of type `int64`, which should be an index into the array `string_table`. So no matter what we did internally, we would need to produce such a table when emitting the pprof file.
-* Secondly, a lot of the strings in the profile are highly likely to be repeated a lot. There are only so many different filenames, method names, etc in a program; if we kept an independent copy of them for each sample in our live allocations map, we would quickly wind up using more memory than we're trying to trace!
-
-For this reason, we intern strings for samples when we get them out of backtracie. The `collector_cdata` struct has a single string interning table, `struct mpp_strtab *string_table`. The string table is implemented in [strtab.c](ext/ruby_memprofiler_pprof_ext/strtab.c) and provides two main families of methods - methods to add a string to the table, like `mpp_strtab_intern`, and ones to remove them, like `mpp_strtab_release`.
-
-The `mpp_strtab_intern` methods take a string, and if the string is not in the table, add it to the table. If the string is already in the table, its refcount is incremented. In both cases, a pointer to the internal string in the intern table is returned; this pointer can be compared to any other pointer returned from `mpp_strtab_intern` to know if it's the same string or not. The `mpp_strtab_release` methods do the opposite; they decrement the refcount of a string in the intern table, and if it was the last reference, free it.
 
 ## Benchmarks
 
