@@ -177,49 +177,92 @@ raw_location *backtracie_frame_wrapper_frames(VALUE wrapper);
 BACKTRACIE_API
 int *backtracie_frame_wrapper_len(VALUE wrapper);
 
+// ========= "Minimal" API ========
+// This part of the API defines a "minimal" version of raw_location, called
+// minimal_location_t. The problem this solves is that marking the iseq &
+// callable method entry stored on the raw_location struct can actually mark a
+// whole lot of memory, but only a small amount of those things are actually
+// needed to compute the method name.
+
+// These values define union descriminator values for minimal_location_t.
+// It's tempting to make this an enum, but apparently an enum in a bitfield is
+// implementation-defined behaviour.
+// It would also be tempting to define these as "const uint16_t", but the
+// ancient version of mingw used to build for Ruby 2.3 on Windows doesn't like
+// using such a constant in a switch statement somehow (??).
+// So... #define's it is.
+#define BACKTRACIE_METHOD_QUALIFIER_CONTENTS_SELF 0u
+#define BACKTRACIE_METHOD_QUALIFIER_CONTENTS_SELF_CLASS 1u
+#define BACKTRACIE_METHOD_QUALIFIER_CONTENTS_CME_CLASS 2u
+#define BACKTRACIE_METHOD_NAME_CONTENTS_CME_ID 0u
+#define BACKTRACIE_METHOD_NAME_CONTENTS_BASE_LABEL 1u
+
 typedef struct {
   // 1 -> ruby frame / 0 -> cfunc frame
   uint16_t is_ruby_frame : 1;
-  // What is in the method_quaalifier field?
-  // 0 -> rb_class_of(the VALUE the method was called on)
-  // 1 -> the VALUE the method was called on
-  // 2 -> the class that the callable_method_entry is defined on.
+  // What is in the method_qualifier field?
+  // 0 -> self
+  // 1 -> self_class
+  // 2 -> cme_defined_class
   uint16_t method_qualifier_contents : 2;
-  // 1 means the "method name" union contains a CME method ID, 0 means it
-  // contains a frame base_label.
-  uint16_t has_cme_method_id : 1;
+  // 0 -> cme_method_id
+  // 1 -> base_label
+  uint16_t method_name_contents : 1;
   // 1 means iseq_type is populated
   uint16_t has_iseq_type : 1;
 
   // Comes from iseq->body->type; is an iseq_type enum.
-  uint16_t iseq_type;
+  // 5 bits is _way_ more than enough to store this enum.
+  uint16_t iseq_type : 5;
 
-  // Line number - we calculate this at capture time because it's fast and thus
-  // we don't need to store the iseq.
+  // We have six bits left over if someone can come up with a good use for them.
+  uint16_t reserved_bits : 6;
+
+  // Line number - we calculate this at capture time because it's fast, and it
+  // saves us from storing the iseq.
   uint32_t line_number;
 
+  // Contains either the callable method entry ID or the iseq base label. The
+  // former if has_cme_method_id is set, the latter if not.
+  // If has_cme_method_id is set, this need not be marked, but if it is NOT set,
+  // then method_name.base_label needs to be marked.
   union {
-    // Comes from callable_method_entry->def->original_id
+    // Comes from callable_method_entry->called_id
     ID cme_method_id;
     // Comes from iseq->body->location.base_label
     VALUE base_label;
   } method_name;
 
   // VALUE for the filename (abs), or Qnil
+  // Needs to be marked
   VALUE filename;
 
-  // See method_qualifier_contents flag.
-  VALUE method_qualifier;
+  // See method_qualifier_contents flag for possible values that can be in here.
+  // Needs to be marked
+  union {
+    VALUE self;              // the VALUE the method was called on
+    VALUE self_class;        // rb_class_of(the VALUE the method was called on)
+    VALUE cme_defined_class; // the class that the callable_method_entry is
+                             // defined on
+  } method_qualifier;
 } minimal_location_t;
 
+// This is like backtracie_capture_frame_for_thread, but captures a
+// minimal_location_t instead of a raw_location.
 BACKTRACIE_API
 bool backtracie_capture_minimal_frame_for_thread(VALUE thread, int frame_index,
                                                  minimal_location_t *loc);
 
+// This is like backtracie_frame_name_cstr, but works on a minimal_location_t
+// instead of a raw_location
 BACKTRACIE_API
 size_t backtracie_minimal_frame_name_cstr(const minimal_location_t *loc,
                                           char *buf, size_t buflen);
+
+// This is like backtracie_frame_filename_cstr, but works on a
+// minimal_location_t instead of a raw_location. Note that this always returns
+// the absolute filename.
 BACKTRACIE_API
-size_t backtracie_minimal_filename_cstr(const minimal_location_t *loc,
-                                        char *buf, size_t buflen);
+size_t backtracie_minimal_frame_filename_cstr(const minimal_location_t *loc,
+                                              char *buf, size_t buflen);
 #endif

@@ -339,10 +339,20 @@ static int collector_compact_each_heap_sample(st_data_t key, st_data_t value, st
 
   for (size_t i = 0; i < sample->frames_count; i++) {
     minimal_location_t *frame = &sample->frames[i];
-    if (!frame->has_cme_method_id) {
+    if (frame->method_name_contents == BACKTRACIE_METHOD_NAME_CONTENTS_BASE_LABEL) {
       frame->method_name.base_label = rb_gc_location(frame->method_name.base_label);
     }
-    frame->method_qualifier = rb_gc_location(frame->method_qualifier);
+    switch (frame->method_qualifier_contents) {
+    case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_SELF:
+      frame->method_qualifier.self = rb_gc_location(frame->method_qualifier.self);
+      break;
+    case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_SELF_CLASS:
+      frame->method_qualifier.self_class = rb_gc_location(frame->method_qualifier.self_class);
+      break;
+    case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_CME_CLASS:
+      frame->method_qualifier.cme_defined_class = rb_gc_location(frame->method_qualifier.cme_defined_class);
+      break;
+    }
     frame->filename = rb_gc_location(frame->filename);
   }
 
@@ -363,10 +373,20 @@ static void collector_mark_sample_value_as_freed(struct collector_cdata *cd, VAL
   if (st_delete(cd->heap_samples, (st_data_t *)&freed_obj, (st_data_t *)&sample)) {
     for (size_t i = 0; i < sample->frames_count; i++) {
       minimal_location_t *frame = &sample->frames[i];
-      if (!frame->has_cme_method_id) {
+      if (frame->method_name_contents == BACKTRACIE_METHOD_NAME_CONTENTS_BASE_LABEL) {
         mark_table_refcount_dec(cd->mark_table, frame->method_name.base_label);
       }
-      mark_table_refcount_dec(cd->mark_table, frame->method_qualifier);
+      switch (frame->method_qualifier_contents) {
+      case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_SELF:
+        mark_table_refcount_dec(cd->mark_table, frame->method_qualifier.self);
+        break;
+      case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_SELF_CLASS:
+        mark_table_refcount_dec(cd->mark_table, frame->method_qualifier.self_class);
+        break;
+      case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_CME_CLASS:
+        mark_table_refcount_dec(cd->mark_table, frame->method_qualifier.cme_defined_class);
+        break;
+      }
       mark_table_refcount_dec(cd->mark_table, frame->filename);
     }
 
@@ -461,10 +481,20 @@ static void collector_tphook_newobj(VALUE tpval, void *data) {
   // Add them to the list of things we will GC mark
   for (size_t i = 0; i < sample->frames_count; i++) {
     minimal_location_t *frame = &sample->frames[i];
-    if (!frame->has_cme_method_id) {
+    if (frame->method_name_contents == BACKTRACIE_METHOD_NAME_CONTENTS_BASE_LABEL) {
       mark_table_refcount_inc(cd->mark_table, frame->method_name.base_label);
     }
-    mark_table_refcount_inc(cd->mark_table, frame->method_qualifier);
+    switch (frame->method_qualifier_contents) {
+    case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_SELF:
+      mark_table_refcount_inc(cd->mark_table, frame->method_qualifier.self);
+      break;
+    case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_SELF_CLASS:
+      mark_table_refcount_inc(cd->mark_table, frame->method_qualifier.self_class);
+      break;
+    case BACKTRACIE_METHOD_QUALIFIER_CONTENTS_CME_CLASS:
+      mark_table_refcount_inc(cd->mark_table, frame->method_qualifier.cme_defined_class);
+      break;
+    }
     mark_table_refcount_inc(cd->mark_table, frame->filename);
   }
 out:

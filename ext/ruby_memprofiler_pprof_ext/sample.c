@@ -35,7 +35,7 @@ size_t mpp_sample_frame_function_name(struct mpp_sample *sample, int frame_index
 }
 
 size_t mpp_sample_frame_file_name(struct mpp_sample *sample, int frame_index, char *outbuf, size_t outbuf_len) {
-  return backtracie_minimal_filename_cstr(&sample->frames[frame_index], outbuf, outbuf_len);
+  return backtracie_minimal_frame_filename_cstr(&sample->frames[frame_index], outbuf, outbuf_len);
 }
 
 int mpp_sample_frame_line_number(struct mpp_sample *sample, int frame_index) {
