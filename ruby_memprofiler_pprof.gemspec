@@ -18,5 +18,8 @@ Gem::Specification.new do |spec|
   spec.executables = %w[ruby_memprofiler_pprof_profile]
 
   spec.required_ruby_version = ">= 2.6.0"
-  spec.add_dependency 'backtracie', '= 0.3.1.dev'
+
+  # This incredibly tight pin on backtracie is required, because we're calling its C internals via
+  # a header file we vendored. Upgrading this requires copoying a new version of the header file.
+  spec.add_dependency 'backtracie', '= 1.0.0'
 end
