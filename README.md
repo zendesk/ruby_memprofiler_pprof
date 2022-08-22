@@ -4,10 +4,9 @@
 
 Ruby_memprofiler_pprof (RMP for short, in this README!) is a tool designed to help understand memory usage in large Ruby applications. It's intended to help answer questions like "why is my app's memory usage so high?", or "why is my app leaking memory?"; it's also designed to be usable in production environments, to help solve the dreaded "...but only in production??" part of those questions too.
 
-RMP is a gem that's intended to run continuously inside a running Ruby app from the very beginning. It periodically produces profile data in the [pprof](https://github.com/google/pprof/blob/master/doc/README.md) format. It's capable of gathering a few different kinds of information, but at its heart the profiles RMP produces contain two key pieces of information:
+RMP is a gem that's intended to run continuously inside a running Ruby app from the very beginning. It periodically produces profile data in the [pprof](https://github.com/google/pprof/blob/master/doc/README.md) format. It's capable of gathering a few different kinds of information, but at its heart the profiles RMP produces contain one key piece of information:
 
-* What codepaths (stack traces) allocated memory, and how much of it? (`allocations`/`allocations_size`)
-* What codepaths (stack traces) allocated objects, that are still live as of when the profile was taken? (`retained_objects`/`retained_size`)
+> What codepaths (stack traces) allocated objects, that are still live as of when the profile was taken? (`retained_objects`/`retained_size`)
 
 Because RMP is designed for production use, it also supports setting a sample rate; when doing this, the profiles contain some random subset of allocations & retained objects, rather than the whole picture themselves. However, the pprof data can also be combined; so, over an entire production environment, you should still be able to get a solid picture of what, on average, is using memory.
 
@@ -16,7 +15,7 @@ Because RMP is designed for production use, it also supports setting a sample ra
 Add the `ruby_memprofiler_pprof` gem to your Gemfile. Note that the gem is pre-alpha and has no stable interface yet, so you should pin to the exact version you want.
 
 ```ruby
-gem 'ruby_memprofiler_pprof', '=0.0.1'
+gem 'ruby_memprofiler_pprof', '=0.0.4'
 ```
 
 You can profile an application with `ruby_memprofiler_pprof` in two ways; either by starting it via the `ruby_memprofiler_pprof_profile` wrapper, or by integrating `ruby_memprofiler_pprof` directly into your code.
