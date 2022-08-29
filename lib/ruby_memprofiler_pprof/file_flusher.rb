@@ -2,6 +2,7 @@
 
 require "fileutils"
 require "forwardable"
+require "time"
 
 module MemprofilerPprof
   class FileFlusher
