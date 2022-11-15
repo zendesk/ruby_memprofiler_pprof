@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require 'backtracie'
+require "backtracie"
 require "ruby_memprofiler_pprof/version"
 require "ruby_memprofiler_pprof/profile_data"
 require "ruby_memprofiler_pprof_ext"

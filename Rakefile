@@ -1,6 +1,7 @@
 require "bundler/gem_tasks"
 require "rake/extensiontask"
 require "rake/testtask"
+require "standard/rake"
 require "bump/tasks"
 
 # Compile verbosely if specified.
@@ -17,7 +18,7 @@ Rake::TestTask.new(:test) do |t|
   t.warning = false
 end
 
-task default: [:compile]
+task default: [:compile, :test, "standard:fix"]
 
 # These Rake tasks run the protobuf compiler to generate the .upb.c code. These are not run as part of
 # the gem install; the generated protobufs are actually checked in. We also check in a complete copy
