@@ -1,0 +1,14 @@
+# Auto generated files with errors to ignore.
+# Remove from this list as you refactor files.
+---
+ignore:
+- ext/ruby_memprofiler_pprof_ext/extconf.rb:
+  - Style/GlobalVars
+- script/benchmark.rb:
+  - Style/GlobalVars
+- script/benchmark_isolated.rb:
+  - Style/GlobalVars
+- test/test_helper.rb:
+  - Style/MissingRespondToMissing
+- test/test_profiling.rb:
+  - Style/GlobalVars

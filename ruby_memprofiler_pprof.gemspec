@@ -21,5 +21,5 @@ Gem::Specification.new do |spec|
 
   # This incredibly tight pin on backtracie is required, because we're calling its C internals via
   # a header file we vendored. Upgrading this requires copoying a new version of the header file.
-  spec.add_dependency 'backtracie', '= 1.0.0'
+  spec.add_dependency "backtracie", "= 1.0.0"
 end

@@ -144,7 +144,7 @@ $VPATH << "$(srcdir)/vendor/upb/third_party/utf8_range"
 $INCFLAGS << " -I#{File.join($srcdir, "vendor/upb")}"
 
 # Include the vendored Backtracie header too
-$INCFLAGS << " -I#{File.join($srcdir, 'vendor/backtracie')}"
+$INCFLAGS << " -I#{File.join($srcdir, "vendor/backtracie")}"
 
 dir_config("ruby")
 
