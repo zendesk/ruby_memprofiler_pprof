@@ -17,7 +17,7 @@ jobs:
           - '3.0'
           - '3.1'
     steps:
-      - uses: zendesk/checkout@v2
+      - uses: zendesk/checkout@v3
       - uses: zendesk/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
