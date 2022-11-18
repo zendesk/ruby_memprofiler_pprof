@@ -1,5 +1,9 @@
 name: Test
-on: push
+on:
+  pull_request:
+  push:
+    branches:
+      - main
 jobs:
   test:
     name: test
@@ -13,24 +17,11 @@ jobs:
           - '3.0'
           - '3.1'
     steps:
-      - uses: zendesk/checkout@v2
+      - uses: zendesk/checkout@v3
       - uses: zendesk/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
-      - name: setup_env
-        run: |
-          echo "BUNDLE_GEMFILE=$GITHUB_WORKSPACE/Gemfile" >> $GITHUB_ENV
-        shell: bash
-      - name: gem_cache
-        id: cache
-        uses: zendesk/cache@v2
-        with:
-          path: vendor/bundle
-          key: cache-${{ runner.os }}-ruby-${{ matrix.ruby }}-${{ hashFiles('Gemfile.lock') }}
-      - name: install_gems
-        run: |
-          bundle config path vendor/bundle
-          bundle install
+          bundler-cache: true
       - name: compile
         run: |
           bundle exec rake compile VERBOSE=true

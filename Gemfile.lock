@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    ruby_memprofiler_pprof (0.0.4.dev)
+    ruby_memprofiler_pprof (0.0.4)
       backtracie (= 1.0.0)
 
 GEM
