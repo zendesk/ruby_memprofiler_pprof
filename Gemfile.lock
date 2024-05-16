@@ -26,7 +26,7 @@ GEM
     pry (0.14.1)
       coderay (~> 1.1)
       method_source (~> 1.0)
-    rack (2.2.4)
+    rack (2.2.9)
     rack-protection (2.2.2)
       rack
     rainbow (3.1.1)
@@ -34,7 +34,8 @@ GEM
     rake-compiler (1.2.0)
       rake
     regexp_parser (2.5.0)
-    rexml (3.2.5)
+    rexml (3.2.8)
+      strscan (>= 3.0.9)
     rubocop (1.35.0)
       json (~> 2.3)
       parallel (~> 1.10)
@@ -60,6 +61,7 @@ GEM
     standard (1.16.0)
       rubocop (= 1.35.0)
       rubocop-performance (= 1.14.3)
+    strscan (3.1.0)
     thwait (0.2.0)
       e2mmap
     tilt (2.0.11)
