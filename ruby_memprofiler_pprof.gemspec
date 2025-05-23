@@ -4,7 +4,7 @@ require_relative "./lib/ruby_memprofiler_pprof/version"
 
 Gem::Specification.new do |spec|
   spec.name = "ruby_memprofiler_pprof"
-  spec.version = MemprofilerPprof::VERSION
+  spec.version = RubyMemprofilerPprof::VERSION
   spec.authors = ["KJ Tsanaktsidis"]
   spec.email = ["ktsanaktsidis@zendesk.com"]
   spec.summary = "Ruby pprof memproy profiler"
